@@ -511,4 +511,318 @@ def train_epoch(model, data_loader, optimizer, device, config, accumulation_step
                 loss = nn.functional.mse_loss(recon_batch, data)
 
         # Check for NaN in output and loss
-        check_for_nan(re
+        check_for_nan(recon_batch, "reconstructed output")
+        check_for_nan(loss, "loss")
+
+        # Backward pass with gradient accumulation
+        loss = loss / accumulation_steps
+        loss.backward()
+
+        if (batch_idx + 1) % accumulation_steps == 0:
+            # Apply gradient clipping if specified
+            if grad_clip:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+            # Update weights and reset gradients
+            optimizer.step()
+            optimizer.zero_grad()
+
+        running_loss += loss.item() * accumulation_steps
+
+    return running_loss / len(data_loader)
+
+
+def validate(model, data_loader, device, config):
+    """
+    Validate the model.
+
+    Args:
+        model (nn.Module): Model to validate
+        data_loader (DataLoader): Data loader
+        device (torch.device): Device
+        config (dict): Configuration
+
+    Returns:
+        float: Average validation loss
+    """
+    model.eval()
+    running_loss = 0.0
+    model_type = config['model']['type']
+
+    with torch.no_grad():
+        for batch in tqdm(data_loader, desc="Validation"):
+            # Handle different dataset types
+            if isinstance(batch, dict):  # For DoseAEDataset
+                data = batch["image"].to(device)
+            else:  # For standard (input, target) dataset
+                data, _ = batch
+                data = data.to(device)
+
+            # Add channel dimension if needed
+            if data.ndim == 3:  # [B, H, W]
+                data = data.unsqueeze(1)  # [B, 1, H, W]
+
+            # Forward pass
+            outputs = model(data)
+
+            # Calculate loss based on model type
+            if model_type == 'vae':
+                recon_batch, mu, logvar = outputs
+                loss = vae_loss_function(
+                    recon_batch,
+                    data,
+                    mu,
+                    logvar,
+                    beta=config['hyperparameters'].get('beta', 1.0),
+                    normalize_outputs=config['preprocessing'].get('use_tanh_output', True)
+                )
+            else:
+                # Handle non-VAE models
+                if isinstance(outputs, tuple):
+                    recon_batch = outputs[0]
+                else:
+                    recon_batch = outputs
+
+                # Calculate loss, optionally only on non-zero regions
+                if config.get('training', {}).get('non_zero_loss', False):
+                    # Mask for non-zero regions
+                    mask = data != 0
+                    if mask.sum() > 0:  # Make sure there are non-zero elements
+                        loss = nn.functional.mse_loss(recon_batch[mask], data[mask])
+                    else:
+                        loss = nn.functional.mse_loss(recon_batch, data)
+                else:
+                    # Regular MSE loss on the entire input
+                    loss = nn.functional.mse_loss(recon_batch, data)
+
+            running_loss += loss.item()
+
+    return running_loss / len(data_loader)
+
+
+def train(config):
+    """
+    Train the model.
+
+    Args:
+        config (dict): Configuration
+
+    Returns:
+        nn.Module: Trained model
+    """
+    # Set device
+    device = torch.device(f"cuda:{config['training']['gpu_id']}" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Set random seed for reproducibility
+    torch.manual_seed(config['training']['seed'])
+    np.random.seed(config['training']['seed'])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config['training']['seed'])
+
+    # Create data loaders
+    data_loaders = create_data_loaders(config)
+
+    # Create model
+    model = get_model(config).to(device)
+    print(f"Model: {config['model']['type']}")
+    print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
+    # Create optimizer and scheduler
+    optimizer = create_optimizer(model, config)
+    scheduler = create_scheduler(optimizer, config)
+
+    # Gradient accumulation steps
+    accumulation_steps = config.get('training', {}).get('accumulation_steps', 1)
+
+    # Early stopping parameters
+    best_val_loss = float('inf')
+    early_stop_counter = 0
+    early_stop_patience = config['hyperparameters']['early_stopping_patience']
+
+    # Initialize wandb if enabled
+    if config['wandb']['use_wandb']:
+        wandb.init(
+            project=config['wandb']['project_name'],
+            entity=config['wandb']['entity'],
+            name=config.get('wandb', {}).get('name', None),
+            config=config
+        )
+        wandb.watch(model)
+
+    # Create output directories
+    os.makedirs(config['output']['model_dir'], exist_ok=True)
+    os.makedirs(config['output']['log_dir'], exist_ok=True)
+    os.makedirs(config['output']['results_dir'], exist_ok=True)
+
+    # Training loop
+    for epoch in range(config['hyperparameters']['epochs']):
+        print(f"\nEpoch {epoch + 1}/{config['hyperparameters']['epochs']}")
+
+        # Train
+        train_loss = train_epoch(model, data_loaders['train'], optimizer, device, config, accumulation_steps)
+
+        # Validate
+        val_loss = validate(model, data_loaders['val'], device, config)
+
+        # Print progress
+        print(f"Train Loss: {train_loss:.6f}, Validation Loss: {val_loss:.6f}")
+
+        # Update scheduler
+        adjust_learning_rate(scheduler, optimizer, val_loss, epoch)
+
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            early_stop_counter = 0
+
+            # Save best model
+            model_type = config['model']['type']
+            save_path = os.path.join(config['output']['model_dir'], f'{model_type}_best_model.pth')
+            save_model(model, save_path)
+
+            if config['wandb']['use_wandb']:
+                wandb.save(save_path)
+
+            print(f"Validation loss improved to {best_val_loss:.6f}, saving model.")
+        else:
+            early_stop_counter += 1
+            print(f"No improvement in validation loss for {early_stop_counter} epochs.")
+            if early_stop_counter >= early_stop_patience:
+                print(f"Early stopping triggered after {epoch + 1} epochs!")
+                break
+
+        # Visualize reconstructions
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            visualize_reconstructions(
+                model,
+                data_loaders['val'],
+                device,
+                config,
+                epoch + 1,
+                config['output']['results_dir']
+            )
+
+        # Log to wandb if enabled
+        if config['wandb']['use_wandb']:
+            wandb.log({
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'learning_rate': optimizer.param_groups[0]['lr']
+            })
+
+    # Save final model
+    model_type = config['model']['type']
+    save_path = os.path.join(config['output']['model_dir'], f'{model_type}_final_model.pth')
+    save_model(model, save_path)
+
+    # Evaluate on test set
+    test_loss = validate(model, data_loaders['test'], device, config)
+    print(f"\nTest Loss: {test_loss:.6f}")
+
+    # Log final test loss to wandb if enabled
+    if config['wandb']['use_wandb']:
+        wandb.log({'test_loss': test_loss})
+        wandb.finish()
+
+    return model
+
+
+def hyperparameter_optimization(config):
+    """
+    Run hyperparameter optimization.
+
+    Args:
+        config (dict): Configuration
+
+    Returns:
+        dict: Best hyperparameters
+    """
+    print("Starting hyperparameter optimization...")
+
+    # Set device
+    device = torch.device(f"cuda:{config['training']['gpu_id']}" if torch.cuda.is_available() else "cpu")
+
+    # Create Optuna study
+    sampler = None
+    if config['optuna']['sampler'] == 'tpe':
+        sampler = optuna.samplers.TPESampler(seed=config['training']['seed'])
+    elif config['optuna']['sampler'] == 'random':
+        sampler = optuna.samplers.RandomSampler(seed=config['training']['seed'])
+
+    pruner = None
+    if config['optuna']['pruner'] == 'median':
+        pruner = optuna.pruners.MedianPruner()
+
+    study = optuna.create_study(
+        direction=config['optuna']['direction'],
+        sampler=sampler,
+        pruner=pruner
+    )
+
+    # Run optimization
+    study.optimize(
+        lambda trial: optuna_objective(trial, config, device),
+        n_trials=config['optuna']['n_trials'],
+        timeout=config['optuna']['timeout']
+    )
+
+    # Print results
+    print("Hyperparameter optimization finished!")
+    print(f"Best trial: {study.best_trial.number}")
+    print(f"Best value: {study.best_trial.value}")
+    print("Best hyperparameters:")
+    for key, value in study.best_trial.params.items():
+        print(f"    {key}: {value}")
+
+    # Save results
+    os.makedirs(config['output']['results_dir'], exist_ok=True)
+    with open(os.path.join(config['output']['results_dir'], 'optuna_results.yaml'), 'w') as f:
+        yaml.dump({
+            'best_trial': study.best_trial.number,
+            'best_value': float(study.best_trial.value),
+            'best_params': study.best_trial.params
+        }, f)
+
+    return study.best_trial.params
+
+
+def main():
+    """
+    Main function.
+    """
+    parser = argparse.ArgumentParser(description="Train an autoencoder for dose distribution")
+    parser.add_argument('--config', type=str, required=True, help="Path to configuration file")
+    parser.add_argument('--optimize', action='store_true', help="Run hyperparameter optimization")
+    parser.add_argument('--data-file', type=str, help="Path to a specific .npy file to use for training")
+    args = parser.parse_args()
+
+    # Load configuration
+    config = load_config(args.config)
+
+    # Update configuration with command-line arguments
+    if args.data_file:
+        config['dataset']['use_single_file'] = True
+        config['dataset']['data_file'] = args.data_file
+
+    # Run hyperparameter optimization if requested
+    if args.optimize:
+        best_params = hyperparameter_optimization(config)
+
+        # Update config with best parameters
+        for key, value in best_params.items():
+            keys = key.split('.')
+            current = config
+            for k in keys[:-1]:
+                current = current[k]
+            current[keys[-1]] = value
+
+    # Train model
+    model = train(config)
+
+    print("Training completed successfully!")
+
+
+if __name__ == "__main__":
+    main()

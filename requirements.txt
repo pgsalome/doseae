@@ -1,0 +1,17 @@
+torch>=1.13.0
+torchvision>=0.14.0
+numpy>=1.22.0
+matplotlib>=3.5.0
+pynrrd>=1.0.0
+scipy>=1.8.0
+tqdm>=4.64.0
+pyyaml>=6.0
+optuna>=3.0.0
+wandb>=0.14.0
+tensorboard>=2.11.0
+scikit-image>=0.19.0
+scikit-learn>=1.1.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
+opencv-python>=4.5.0
+pandas>=1.4.0

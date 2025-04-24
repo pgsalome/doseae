@@ -29,7 +29,7 @@ def extract_informative_patches_2d(image, patch_size=(64, 64), threshold=0.01):
     patches = []
     for i in range(0, i_h - p_h + 1, p_h):
         for j in range(0, i_w - p_w + 1, p_w):
-            patch = image[i: i + p_h, j: j + p_w]
+            patch = image[i : i + p_h, j : j + p_w]
             if np.std(patch) > threshold:
                 patches.append(patch)
 
@@ -131,7 +131,7 @@ def extract_patches_3d(volume, patch_size, max_patches=None, random_state=None):
     Extract patches from a 3D volume.
 
     Args:
-        volume (numpy.ndarray): Input 3D volume (D, H, W)
+        volume (numpy.ndarray): Input volume (D, H, W)
         patch_size (tuple): Size of the patches (depth, height, width)
         max_patches (int or float, optional): Maximum number of patches to extract
         random_state (int or RandomState, optional): Random seed or state
@@ -147,102 +147,64 @@ def extract_patches_3d(volume, patch_size, max_patches=None, random_state=None):
             "Patch dimensions should be less than the corresponding volume dimensions."
         )
 
+    # Reshape to add a channel dimension if needed
+    if volume.ndim == 3:
+        volume = volume.reshape((i_d, i_h, i_w, 1))
+
+    n_channels = volume.shape[3]
+
     # Calculate the total number of possible patches
-    all_patches = (i_d - p_d + 1) * (i_h - p_h + 1) * (i_w - p_w + 1)
+    d_indices = range(0, i_d - p_d + 1, p_d)
+    h_indices = range(0, i_h - p_h + 1, p_h)
+    w_indices = range(0, i_w - p_w + 1, p_w)
 
-    # If max_patches is a fraction, calculate the actual number
-    if max_patches is not None and isinstance(max_patches, float) and 0 < max_patches < 1:
-        max_patches = int(max_patches * all_patches)
-
-    # If we need to select patches randomly
-    if max_patches is not None and max_patches < all_patches:
-        rng = np.random.RandomState(random_state)
-
-        # Generate random indices
-        d_indices = rng.randint(0, i_d - p_d + 1, size=max_patches)
-        h_indices = rng.randint(0, i_h - p_h + 1, size=max_patches)
-        w_indices = rng.randint(0, i_w - p_w + 1, size=max_patches)
-
-        # Extract the patches
-        patches = np.array([
-            volume[d:d + p_d, h:h + p_h, w:w + p_w]
-            for d, h, w in zip(d_indices, h_indices, w_indices)
-        ])
-    else:
-        # Extract all patches systematically
-        patches = []
-        for d in range(0, i_d - p_d + 1):
-            for h in range(0, i_h - p_h + 1):
-                for w in range(0, i_w - p_w + 1):
-                    patch = volume[d:d + p_d, h:h + p_h, w:w + p_w]
+    # Extract all patches
+    patches = []
+    for d in d_indices:
+        for h in h_indices:
+            for w in w_indices:
+                patch = volume[d:d+p_d, h:h+p_h, w:w+p_w, :]
+                # Only keep patches with information (non-zero std)
+                if np.std(patch) > 0.01:
                     patches.append(patch)
-        patches = np.array(patches)
+
+    # Convert to numpy array
+    patches = np.array(patches)
+
+    # Reshape to remove channel dimension if it's 1
+    if n_channels == 1:
+        patches = patches.reshape(-1, p_d, p_h, p_w)
+
+    # If max_patches is provided and less than the total number of patches,
+    # randomly select a subset
+    if max_patches and max_patches < len(patches):
+        rng = np.random.RandomState(random_state)
+        indices = rng.choice(len(patches), size=max_patches, replace=False)
+        patches = patches[indices]
 
     return patches
 
 
-def extract_informative_patches_3d(volume, patch_size=(16, 64, 64), threshold=0.01):
+def resize_3d_volume(volume, target_shape):
     """
-    Extract 3D patches with information content (standard deviation > threshold).
+    Resize a 3D volume to the target shape.
 
     Args:
-        volume (numpy.ndarray): 3D volume to extract patches from
-        patch_size (tuple): Size of patches (depth, height, width)
-        threshold (float): Minimum standard deviation threshold for a patch to be considered informative
+        volume (numpy.ndarray): Input 3D volume
+        target_shape (tuple): Target shape (D, H, W)
 
     Returns:
-        numpy.ndarray: Array of informative patches
+        numpy.ndarray: Resized volume
     """
-    i_d, i_h, i_w = volume.shape
-    p_d, p_h, p_w = patch_size
+    from scipy.ndimage import zoom
 
-    if p_d > i_d or p_h > i_h or p_w > i_w:
-        raise ValueError("Patch size should be smaller than volume dimensions.")
+    # Calculate scale factors
+    factors = [t / s for t, s in zip(target_shape, volume.shape)]
 
-    patches = []
-    for d in range(0, i_d - p_d + 1, p_d):
-        for h in range(0, i_h - p_h + 1, p_h):
-            for w in range(0, i_w - p_w + 1, p_w):
-                patch = volume[d:d + p_d, h:h + p_h, w:w + p_w]
-                if np.std(patch) > threshold:
-                    patches.append(patch)
+    # Apply zoom
+    resized = zoom(volume, factors, order=1, mode='nearest')
 
-    return np.array(patches)
-
-
-def resize_2d_slices(npy_path, output_dir, new_shape=(256, 256)):
-    """
-    Resize slices in a .npy file.
-
-    Args:
-        npy_path (str): Path to .npy file
-        output_dir (str): Output directory
-        new_shape (tuple): New shape (height, width)
-
-    Returns:
-        str: Path to resized file
-    """
-    # Load the .npy file
-    slices = np.load(npy_path)
-
-    # Create an empty array to store the resized slices
-    resized_slices = np.zeros((slices.shape[0], new_shape[0], new_shape[1]), dtype=slices.dtype)
-
-    # Resize each slice
-    for i in range(slices.shape[0]):
-        original_slice = slices[i]
-        resized_slice = cv2.resize(original_slice, new_shape, interpolation=cv2.INTER_AREA)
-        resized_slices[i] = resized_slice
-
-    # Generate the output file path
-    base_name = os.path.basename(npy_path)
-    resized_npy_path = os.path.join(output_dir, base_name)
-
-    # Save the resized slices back to a .npy file
-    np.save(resized_npy_path, resized_slices)
-
-    print(f"Resized slices saved to {resized_npy_path}")
-    return resized_npy_path
+    return resized
 
 
 def main():
@@ -252,34 +214,18 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Extract informative patches from dose distribution data")
-    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
-
-    # Extract patches command
-    extract_parser = subparsers.add_parser("extract", help="Extract informative patches")
-    extract_parser.add_argument("--input-dir", type=str, required=True, help="Directory containing .npy files")
-    extract_parser.add_argument("--output-dir", type=str, required=True, help="Directory to save extracted patches")
-    extract_parser.add_argument("--patch-size", type=int, nargs=2, default=[64, 64], help="Patch size (height width)")
-    extract_parser.add_argument("--threshold", type=float, default=0.01, help="Standard deviation threshold")
-
-    # Resize command
-    resize_parser = subparsers.add_parser("resize", help="Resize slices in .npy files")
-    resize_parser.add_argument("--input-dir", type=str, required=True, help="Directory containing .npy files")
-    resize_parser.add_argument("--output-dir", type=str, required=True, help="Directory to save resized files")
-    resize_parser.add_argument("--new-shape", type=int, nargs=2, default=[256, 256], help="New shape (height width)")
+    parser.add_argument('--input', type=str, required=True, help="Input .npy file or directory")
+    parser.add_argument('--output', type=str, required=True, help="Output directory")
+    parser.add_argument('--patch-size', type=int, nargs=2, default=[64, 64], help="Patch size (height width)")
+    parser.add_argument('--threshold', type=float, default=0.01, help="Minimum standard deviation threshold")
+    parser.add_argument('--is-directory', action='store_true', help="Input is a directory of .npy files")
 
     args = parser.parse_args()
 
-    if args.command == "extract":
-        process_npy_folder(args.input_dir, args.output_dir, tuple(args.patch_size), args.threshold)
-    elif args.command == "resize":
-        # Process all .npy files in the input directory
-        os.makedirs(args.output_dir, exist_ok=True)
-        for file_name in os.listdir(args.input_dir):
-            if file_name.endswith(".npy"):
-                npy_path = os.path.join(args.input_dir, file_name)
-                resize_2d_slices(npy_path, args.output_dir, tuple(args.new_shape))
+    if args.is_directory:
+        process_npy_folder(args.input, args.output, tuple(args.patch_size), args.threshold)
     else:
-        parser.print_help()
+        process_single_npy_file(args.input, args.output, tuple(args.patch_size), args.threshold)
 
 
 if __name__ == "__main__":

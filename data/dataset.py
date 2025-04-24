@@ -1,3 +1,4 @@
+
 import os
 import glob
 import numpy as np
@@ -289,11 +290,6 @@ def create_data_loaders(config):
     Returns:
         dict: Dictionary containing DataLoaders for train, val, and test sets
     """
-    # Check if we should use a single file
-    if config.get('dataset', {}).get('use_single_file', False):
-        data_file = config['dataset']['data_file']
-        return create_data_loaders_from_numpy(config, data_file)
-
     # Check if we're working with 2D or 3D data
     is_2d = config.get('dataset', {}).get('is_2d_data', False)
 
@@ -374,7 +370,7 @@ def create_data_loaders_from_numpy(config, data_path):
     # Create custom dataset
     full_dataset = DoseAEDataset(
         image_list=images,
-        transform=Transforms.Compose([
+        transform=transforms.Compose([
             Normalize(
                 to_range=(-1, 1) if config['preprocessing'].get('use_tanh_output', True) else (0, 1),
                 percentile=95
@@ -425,3 +421,5 @@ def create_data_loaders_from_numpy(config, data_path):
         'val': val_loader,
         'test': test_loader
     }
+
+
