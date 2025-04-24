@@ -1,0 +1,76 @@
+dataset:
+  data_dir: '/path/to/dose_distribution/data'
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  input_size: [64, 64, 64]  # 3D input size (D, H, W)
+  input_size_2d: 256  # 2D input size (square images)
+  is_2d_data: false  # Set to true for 2D dose distribution data
+  use_patches: false  # Set to true if using pre-extracted patches
+  patch_size: [64, 64]  # Size of patches for 2D data
+  patch_size_3d: [16, 64, 64]  # Size of patches for 3D data
+  use_single_file: false  # Set to true to train on a single .npy file
+  data_file: null  # Path to single .npy file if use_single_file is true
+
+preprocessing:
+  normalize: true
+  augment: true
+  rotate: true
+  flip: true
+  adjust_brightness: true
+  use_tanh_output: true  # Use tanh instead of sigmoid for output normalization
+  percentile_norm: 95  # Percentile for normalization (0-100)
+
+model:
+  type: 'vae'  # Options: 'vae', 'resnet_ae', 'unet_ae', 'conv_autoencoder', 'mlp_autoencoder', 'unet'
+  is_2d: false  # Set to true for 2D models
+  latent_dim: 128
+  in_channels: 1
+  base_filters: 32
+  bottleneck_filters: 256
+  dropout_rate: 0.3  # Dropout rate for regularization
+
+hyperparameters:
+  learning_rate: 0.0001
+  batch_size: 8
+  epochs: 100
+  early_stopping_patience: 10
+  weight_decay: 0.0001
+  beta: 1.0  # KL divergence weight for VAE
+
+training:
+  optimizer: 'adam'  # Options: 'adam', 'sgd', 'rmsprop'
+  scheduler: 'reduce_on_plateau'  # Options: 'reduce_on_plateau', 'cosine_annealing', 'none'
+  loss: 'mse'  # Options: 'mse', 'bce', 'combined'
+  gpu_id: 0
+  seed: 42
+  grad_clip: 0.1  # Gradient clipping threshold
+  non_zero_loss: false  # Whether to calculate loss only on non-zero regions
+  accumulation_steps: 1  # Gradient accumulation steps
+
+wandb:
+  use_wandb: true
+  project_name: 'dose_distribution_autoencoder'
+  entity: 'your_username'
+  name: null  # Run name (will be auto-generated if null)
+
+optuna:
+  use_optuna: false
+  n_trials: 50
+  timeout: 86400  # 24 hours
+  direction: 'minimize'  # 'minimize' or 'maximize'
+  sampler: 'tpe'  # Options: 'tpe', 'random', 'grid'
+  pruner: 'median'  # Options: 'median', 'none'
+
+output:
+  model_dir: './models'
+  log_dir: './logs'
+  results_dir: './results'
+
+patch_extraction:
+  enable: false  # Set to true to extract patches during preprocessing
+  max_patches_per_slice: 100  # Maximum number of patches to extract per slice
+  max_patches_per_volume: 500  # Maximum number of patches to extract per volume
+  random_state: 42  # Random seed for patch extraction
+  output_dir: './patches'  # Directory to save extracted patches
+  threshold: 0.01  # Standard deviation threshold for informative patches
