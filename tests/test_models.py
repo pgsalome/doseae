@@ -270,4 +270,53 @@ def test_model_factory_3d(config_3d):
     model = get_model(config_3d)
     assert isinstance(model, ResNetAutoencoder)
 
-    # Tes
+    # Test UNet AE
+    config_3d['model']['type'] = 'unet_ae'
+    model = get_model(config_3d)
+    assert isinstance(model, UNetAutoencoder)
+
+
+def test_model_factory_2d(config_2d):
+    """
+    Test model factory function with 2D models.
+    """
+    # Test 2D VAE
+    config_2d['model']['type'] = 'vae'
+    config_2d['model']['is_2d'] = True
+    model = get_model(config_2d)
+    assert isinstance(model, VAE2D)
+
+    # Test 2D Conv Autoencoder
+    config_2d['model']['type'] = 'conv_autoencoder'
+    config_2d['model']['is_2d'] = True
+    model = get_model(config_2d)
+    assert isinstance(model, ConvAutoencoder2D)
+
+    # Test 2D MLP Autoencoder
+    config_2d['model']['type'] = 'mlp_autoencoder'
+    config_2d['model']['is_2d'] = True
+    model = get_model(config_2d)
+    assert isinstance(model, MLPAutoencoder2D)
+
+    # Test 2D UNet
+    config_2d['model']['type'] = 'unet'
+    config_2d['model']['is_2d'] = True
+    model = get_model(config_2d)
+    assert isinstance(model, UNet2D)
+
+
+def test_invalid_model_type():
+    """
+    Test model factory function with invalid model type.
+    """
+    config = {
+        'model': {
+            'type': 'invalid_type',
+            'latent_dim': 64,
+            'in_channels': 1,
+            'base_filters': 16
+        }
+    }
+
+    with pytest.raises(ValueError):
+        get_model(config)

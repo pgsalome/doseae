@@ -1,12 +1,11 @@
 dataset:
   data_dir: '/path/to/dose_distribution/data'
+  data_pkl: null  # Will be updated automatically after preprocessing
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
   input_size: [64, 64, 64]  # 3D input size (D, H, W)
   input_size_2d: 256  # 2D input size (square images)
-  is_2d_data: false  # Set to true for 2D dose distribution data
-  use_patches: false  # Set to true if using pre-extracted patches
   patch_size: [64, 64]  # Size of patches for 2D data
   patch_size_3d: [16, 64, 64]  # Size of patches for 3D data
   use_single_file: false  # Set to true to train on a single .npy file
@@ -14,12 +13,35 @@ dataset:
 
 preprocessing:
   normalize: true
+  normalize_method: "95percentile"  # "95percentile", "minmax", "zscore", or "prescription"
+  percentile_norm: 95  # Percentile for normalization (0-100)
+  prescription_dose: 45  # Prescription dose in Gy (or dictionary mapping patient IDs to doses)
+  use_tanh_output: true  # Use tanh instead of sigmoid for output normalization
+  voxel_spacing: [2, 2, 2]  # Physical spacing in mm (isotropic or anisotropic)
+  resize_to: null  # Target size for resampling, null to keep original size
+  unit_type: "voxels"  # "voxels" or "mm" - how size values are interpreted
+  extract_slices: false  # Whether to extract 2D slices from 3D volumes
+  slice_extraction: "informative"  # "all", "center", or "informative"
+  non_zero_threshold: 0.05  # For informative slice extraction
+  num_workers: 8  # Number of parallel workers
+  batch_size: 1000  # Batch size for saving
+
+  # Data augmentation settings (used during training)
   augment: true
   rotate: true
   flip: true
   adjust_brightness: true
-  use_tanh_output: true  # Use tanh instead of sigmoid for output normalization
-  percentile_norm: 95  # Percentile for normalization (0-100)
+
+patch_extraction:
+  enable: false  # Set to true to extract patches
+  patch_dimension: "3D"  # "2D" or "3D" - dimensionality of patches to extract
+  patch_size: [50, 50, 50]  # Size of patches to extract (in voxels or mm)
+  patch_unit_type: "voxels"  # "voxels" or "mm" - how patch_size values are interpreted
+  threshold: 0.01  # Standard deviation threshold for informative patches
+  max_patches_per_slice: 100  # Maximum number of patches to extract per slice
+  max_patches_per_volume: 500  # Maximum number of patches to extract per volume
+  random_state: 42  # Random seed for patch extraction
+  output_dir: './patches'  # Directory to save extracted patches
 
 model:
   type: 'vae'  # Options: 'vae', 'resnet_ae', 'unet_ae', 'conv_autoencoder', 'mlp_autoencoder', 'unet'
@@ -51,8 +73,8 @@ training:
 wandb:
   use_wandb: true
   project_name: 'dose_distribution_autoencoder'
-  entity: 'your_username'
-  name: null  # Run name (will be auto-generated if null)
+  entity: 'pgsalome'
+  name: 'doseae'  # Run name (will be auto-generated if null)
 
 optuna:
   use_optuna: false
@@ -66,11 +88,3 @@ output:
   model_dir: './models'
   log_dir: './logs'
   results_dir: './results'
-
-patch_extraction:
-  enable: false  # Set to true to extract patches during preprocessing
-  max_patches_per_slice: 100  # Maximum number of patches to extract per slice
-  max_patches_per_volume: 500  # Maximum number of patches to extract per volume
-  random_state: 42  # Random seed for patch extraction
-  output_dir: './patches'  # Directory to save extracted patches
-  threshold: 0.01  # Standard deviation threshold for informative patches
