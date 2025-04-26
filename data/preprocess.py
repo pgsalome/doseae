@@ -10,6 +10,7 @@ import torch
 import SimpleITK as sitk
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import random
 import matplotlib.pyplot as plt
@@ -37,7 +38,40 @@ def load_config(config_path):
     return config
 
 
+def debug_nrrd_file(file_path):
+    """
+    Debug an NRRD file to see if it contains valid data.
 
+    Args:
+        file_path (str): Path to NRRD file
+
+    Returns:
+        bool: True if file was examined successfully
+    """
+    try:
+        data, header = nrrd.read(file_path)
+        print(f"File: {file_path}")
+        print(f"Shape: {data.shape}")
+        print(f"Data type: {data.dtype}")
+        print(f"Min value: {np.min(data)}")
+        print(f"Max value: {np.max(data)}")
+        print(f"Mean value: {np.mean(data)}")
+        print(
+            f"Non-zero values: {np.count_nonzero(data)}/{data.size} ({np.count_nonzero(data) / data.size * 100:.2f}%)")
+
+        # Visualize a middle slice if it's 3D
+        if len(data.shape) == 3:
+            mid_slice = data.shape[0] // 2
+            plt.figure(figsize=(10, 8))
+            plt.imshow(data[mid_slice], cmap='viridis')
+            plt.colorbar()
+            plt.title(f"{os.path.basename(file_path)} - Slice {mid_slice}")
+            plt.savefig(f"debug_{os.path.basename(file_path)}.png", dpi=300)
+            plt.close()
+        return True
+    except Exception as e:
+        print(f"Error examining {file_path}: {e}")
+        return False
 
 
 def resample_volume(volume, original_spacing, target_spacing):
@@ -165,7 +199,7 @@ def process_patient_folder(patient_folder, config):
     processed_items = []
 
     # Check for dose image file
-    dose_file = os.path.join(patient_folder, 'image_dd.nrrd')
+    dose_file = os.path.join(patient_folder, 'image_dd.nrrd')  # Despite name, it's dose distribution
     if not os.path.exists(dose_file):
         logger.warning(f"No dose distribution image found in {patient_folder}")
         return []
@@ -944,9 +978,22 @@ def create_dataset(config):
         first_patient = patient_folders[0]
         logger.info(f"Examining first patient folder: {first_patient}")
 
+        # Check dose file
+        dose_file = first_patient / "image_ct.nrrd"  # Despite name, it's dose distribution
+        if dose_file.exists():
+            logger.info(f"Found dose distribution image: {dose_file}")
+            debug_nrrd_file(str(dose_file))
+        else:
+            logger.warning(f"No dose distribution image found for first patient")
+
         # Check mask files
         for mask_type in ['lungctr', 'lungipsi']:
             mask_file = first_patient / f"mask_{mask_type}.nrrd"
+            if mask_file.exists():
+                logger.info(f"Found {mask_type} mask: {mask_file}")
+                debug_nrrd_file(str(mask_file))
+            else:
+                logger.warning(f"No {mask_type} mask found for first patient")
 
     # Use output_dir from dataset if specified, otherwise use default
     if 'output_dir' in config['dataset']:

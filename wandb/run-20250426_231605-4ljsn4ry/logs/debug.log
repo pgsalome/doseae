@@ -1,0 +1,33 @@
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:setup_run_log_directory():724] Logging user logs to /home/e210/git/doseae/wandb/run-20250426_231605-4ljsn4ry/logs/debug.log
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:setup_run_log_directory():725] Logging internal logs to /home/e210/git/doseae/wandb/run-20250426_231605-4ljsn4ry/logs/debug-internal.log
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:init():852] calling init triggers
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:init():857] wandb.init called with sweep_config: {}
+config: {'dataset': {'data_dir': '/media/e210/HD81/Adhvaith_datasets/nsclc_public', 'data_pkl': '/media/e210/HD81/Adhvaith_datasets/results/datasets/test_20/volumes_dataset.pkl', 'train_ratio': 0.8, 'val_ratio': 0.1, 'test_ratio': 0.1, 'input_size': [64, 64, 64], 'input_size_2d': 256, 'patch_size': [64, 64], 'patch_size_3d': [16, 64, 64], 'use_single_file': True, 'data_file': '/media/e210/HD81/Adhvaith_datasets/results/datasets/test_20/volumes_dataset.pkl', 'test_mode': True, 'n_test_samples': 20}, 'preprocessing': {'normalize': False, 'normalize_method': '95percentile', 'percentile_norm': 95, 'voxel_spacing': [2, 2, 2], 'resize_to': [128, 128, 64], 'unit_type': 'voxels', 'extract_slices': False, 'slice_extraction': 'informative', 'non_zero_threshold': 0.05, 'num_workers': 8, 'batch_size': 1000, 'use_tanh_output': True}, 'transforms': {'augment': True, 'rotate': True, 'flip': True, 'adjust_brightness': True, 'random_crop': False, 'random_noise': False}, 'patch_extraction': {'enable': False, 'patch_dimension': '3D', 'patch_size': [50, 50, 50], 'patch_unit_type': 'voxels', 'threshold': 0.01, 'max_patches_per_slice': 100, 'max_patches_per_volume': 500, 'random_state': 42}, 'model': {'type': 'resnet_ae', 'is_2d': False, 'latent_dim': 154, 'in_channels': 1, 'base_filters': 18, 'bottleneck_filters': 256, 'dropout_rate': 0.3}, 'hyperparameters': {'learning_rate': 0.0006998769331752384, 'batch_size': 4, 'epochs': 100, 'early_stopping_patience': 10, 'weight_decay': 0.0001668421790225709, 'beta': 1.0}, 'training': {'optimizer': 'sgd', 'scheduler': 'reduce_on_plateau', 'loss': 'mse', 'gpu_id': 0, 'seed': 42, 'grad_clip': 0.1, 'non_zero_loss': False, 'accumulation_steps': 1}, 'wandb': {'use_wandb': True, 'project_name': 'dose_distribution_autoencoder', 'entity': 'pgsalome', 'name': 'trial_9', 'group': 'resumed_opt_20250426_231549', 'tags': ['optimization', 'trial_9']}, 'optuna': {'use_optuna': False, 'n_trials': 50, 'timeout': 86400, 'direction': 'minimize', 'sampler': 'tpe', 'pruner': 'median'}, 'output': {'model_dir': '/media/e210/HD81/Adhvaith_datasets/results/models', 'log_dir': '/media/e210/HD81/Adhvaith_datasets/results/logs', 'results_dir': '/media/e210/HD81/Adhvaith_datasets/results'}, 'trial_num': 9, '_wandb': {}}
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:init():893] starting backend
+2025-04-26 23:16:05,874 INFO    MainThread:3637910 [wandb_init.py:init():897] sending inform_init request
+2025-04-26 23:16:05,875 INFO    MainThread:3637910 [backend.py:_multiprocessing_setup():101] multiprocessing start_methods=fork,spawn,forkserver, using: spawn
+2025-04-26 23:16:05,875 INFO    MainThread:3637910 [wandb_init.py:init():907] backend started and connected
+2025-04-26 23:16:05,878 INFO    MainThread:3637910 [wandb_init.py:init():1002] updated telemetry
+2025-04-26 23:16:05,918 INFO    MainThread:3637910 [wandb_init.py:init():1026] communicating run to backend with 90.0 second timeout
+2025-04-26 23:16:06,209 WARNING MainThread:3637910 [wandb_init.py:init():1654] [no run ID] interrupted
+Traceback (most recent call last):
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/wandb_init.py", line 1650, in init
+    return wi.init(run_settings, run_config, run_printer)
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/wandb_init.py", line 1052, in init
+    result = wait_with_progress(
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 24, in wait_with_progress
+    return wait_all_with_progress(
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 70, in wait_all_with_progress
+    return _wait_handles(handle_list, timeout=progress_after)
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 110, in _wait_handles
+    results.append(handle.wait_or(timeout=remaining_timeout))
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/mailbox/mailbox_handle.py", line 122, in wait_or
+    return self._fn(self._handle.wait_or(timeout=timeout))
+  File "/home/e210/git/doseae/venv/lib/python3.8/site-packages/wandb/sdk/mailbox/response_handle.py", line 88, in wait_or
+    if not self._event.wait(timeout=timeout):
+  File "/home/e210/anaconda3/lib/python3.8/threading.py", line 558, in wait
+    signaled = self._cond.wait(timeout)
+  File "/home/e210/anaconda3/lib/python3.8/threading.py", line 306, in wait
+    gotit = waiter.acquire(True, timeout)
+KeyboardInterrupt
+2025-04-26 23:16:06,443 INFO    MsgRouterThr:3637910 [mailbox.py:close():129] [no run ID] Closing mailbox, abandoning 7 handles.

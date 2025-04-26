@@ -1,0 +1,13 @@
+{"time":"2025-04-26T23:16:05.87557323+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/home/e210/git/doseae/wandb/run-20250426_231605-4ljsn4ry/logs/debug-core.log"}
+{"time":"2025-04-26T23:16:06.139031006+02:00","level":"INFO","msg":"created new stream","id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.139086895+02:00","level":"INFO","msg":"stream: started","id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.13911688+02:00","level":"INFO","msg":"handler: started","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.13911794+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.139124835+02:00","level":"INFO","msg":"sender: started","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.444493034+02:00","level":"INFO","msg":"stream: closing","id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.553102699+02:00","level":"ERROR","msg":"sender: upsertConfig: RunRecord is nil"}
+{"time":"2025-04-26T23:16:06.983256493+02:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-04-26T23:16:06.983368484+02:00","level":"INFO","msg":"handler: closed","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.983408046+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.983447228+02:00","level":"INFO","msg":"sender: closed","stream_id":"4ljsn4ry"}
+{"time":"2025-04-26T23:16:06.983484212+02:00","level":"INFO","msg":"stream: closed","id":"4ljsn4ry"}

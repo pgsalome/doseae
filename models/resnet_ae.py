@@ -168,7 +168,7 @@ class ResNetAutoencoder(BaseAutoencoder):
     ResNet-style autoencoder for 3D dose distribution.
     """
 
-    def __init__(self, in_channels=1, latent_dim=128, base_filters=32):
+    def __init__(self, in_channels=1, latent_dim=128, base_filters=32, input_size=(64, 64, 64)):
         """
         Initialize the ResNet autoencoder.
 
@@ -176,48 +176,32 @@ class ResNetAutoencoder(BaseAutoencoder):
             in_channels (int): Number of input channels
             latent_dim (int): Dimension of the latent space
             base_filters (int): Number of base filters
+            input_size (tuple): Input dimensions (D, H, W)
         """
         super(ResNetAutoencoder, self).__init__(in_channels, latent_dim)
 
-        # Encoder and decoder
-        self.encoder = ResNetEncoder(in_channels, base_filters, latent_dim)
-        self.decoder = ResNetDecoder(latent_dim, base_filters, in_channels)
+        self.input_size = input_size
 
-    def forward(self, x):
-        """
-        Forward pass through the autoencoder.
+        # Calculate dimensions after encoding (divide by 16 for 4 layers of stride 2)
+        self.encoded_size = (
+            input_size[0] // 16,
+            input_size[1] // 16,
+            input_size[2] // 16
+        )
 
-        Args:
-            x (torch.Tensor): Input tensor
+        # Pass this size to the encoder and decoder
+        self.encoder = ResNetEncoder(
+            in_channels,
+            base_filters,
+            latent_dim,
+            input_size=input_size,
+            encoded_size=self.encoded_size
+        )
 
-        Returns:
-            torch.Tensor: Reconstructed output
-        """
-        z = self.encoder(x)
-        return self.decoder(z)
-
-    def get_losses(self, x, x_recon):
-        """
-        Calculate reconstruction loss.
-
-        Args:
-            x (torch.Tensor): Original input
-            x_recon (torch.Tensor): Reconstructed input
-
-        Returns:
-            dict: Dictionary of loss components
-        """
-        # MSE loss
-        mse_loss = nn.functional.mse_loss(x_recon, x, reduction='mean')
-
-        # Add L1 loss for better preservation of sharp edges
-        l1_loss = nn.functional.l1_loss(x_recon, x, reduction='mean')
-
-        # Combined loss
-        total_loss = mse_loss + 0.1 * l1_loss
-
-        return {
-            'mse_loss': mse_loss,
-            'l1_loss': l1_loss,
-            'total_loss': total_loss
-        }
+        self.decoder = ResNetDecoder(
+            latent_dim,
+            base_filters,
+            in_channels,
+            encoded_size=self.encoded_size,
+            output_size=input_size
+        )

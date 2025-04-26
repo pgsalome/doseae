@@ -1,0 +1,16 @@
+{"time":"2025-04-26T23:34:53.693673296+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/home/e210/git/doseae/wandb/run-20250426_233453-nf5r6nms/logs/debug-core.log"}
+{"time":"2025-04-26T23:34:53.968113026+02:00","level":"INFO","msg":"created new stream","id":"nf5r6nms"}
+{"time":"2025-04-26T23:34:53.968146396+02:00","level":"INFO","msg":"stream: started","id":"nf5r6nms"}
+{"time":"2025-04-26T23:34:53.96817599+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:34:53.968208887+02:00","level":"INFO","msg":"sender: started","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:34:53.968187223+02:00","level":"INFO","msg":"handler: started","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:34:54.530605092+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-04-26T23:35:02.890875839+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-04-26T23:35:02.890995449+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-04-26T23:35:03.103500839+02:00","level":"INFO","msg":"stream: closing","id":"nf5r6nms"}
+{"time":"2025-04-26T23:35:03.103567241+02:00","level":"WARN","msg":"sender: received Exit record more than once, ignoring"}
+{"time":"2025-04-26T23:35:03.465802269+02:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-04-26T23:35:03.646711745+02:00","level":"INFO","msg":"handler: closed","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:35:03.646801145+02:00","level":"INFO","msg":"sender: closed","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:35:03.646789612+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"nf5r6nms"}
+{"time":"2025-04-26T23:35:03.646899003+02:00","level":"INFO","msg":"stream: closed","id":"nf5r6nms"}

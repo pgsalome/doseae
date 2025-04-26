@@ -14,14 +14,20 @@ class ToTensor(object):
     """
 
     def __call__(self, sample):
-        image = sample["image"]
-        if not isinstance(image, np.ndarray):
-            raise TypeError("Image should be a numpy array")
+        """Convert ndarrays to Tensors."""
+        image, zc = sample['image'], sample['zc']
 
-        # Convert to torch tensor
-        image = torch.tensor(image, dtype=torch.float32)
+        # Convert image from numpy array to torch tensor
+        image_tensor = torch.from_numpy(image.copy()).float()
 
-        return {"image": image, "zc": sample.get("zc", 0)}
+        # Ensure image has channel dimension for batch processing
+        if image_tensor.ndim == 3:  # [D, H, W]
+            image_tensor = image_tensor.unsqueeze(0)  # [1, D, H, W]
+
+        # Convert zc to tensor
+        zc_tensor = torch.tensor(zc, dtype=torch.float32)
+
+        return {'image': image_tensor, 'zc': zc_tensor}
 
 
 class NormalizeTo95PercentDose(object):

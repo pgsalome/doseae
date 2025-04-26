@@ -125,8 +125,13 @@ class DoseAEDataset(Dataset):
         return len(self.image_list)
 
     def __getitem__(self, idx):
+        """Get a sample from the dataset."""
         image = self.image_list[idx]
         zc = self.zc_values[idx]
+
+        # Ensure image has channel dimension
+        if len(image.shape) == 3:  # [D, H, W]
+            image = np.expand_dims(image, axis=0)  # Add channel -> [1, D, H, W]
 
         # Create a sample dictionary
         sample = {"image": image, "zc": zc}
@@ -285,17 +290,12 @@ class Normalize:
 def create_data_loaders(config):
     """
     Create train, validation, and test data loaders.
-
-    Args:
-        config (dict): Configuration dictionary
-
-    Returns:
-        dict: Dictionary containing DataLoaders for train, val, and test sets
     """
-    # Check if we should use a preprocessed pickle file
-    if config.get('dataset', {}).get('data_pkl') and os.path.exists(config['dataset']['data_pkl']):
-        print(f"Loading data from pickle file: {config['dataset']['data_pkl']}")
-        try:
+    try:
+        # Check if we should use a preprocessed pickle file
+        if config.get('dataset', {}).get('data_pkl') and os.path.exists(config['dataset']['data_pkl']):
+            print(f"Loading data from pickle file: {config['dataset']['data_pkl']}")
+
             # Load the pickle file
             with open(config['dataset']['data_pkl'], 'rb') as f:
                 data = pickle.load(f)
@@ -307,62 +307,80 @@ def create_data_loaders(config):
                     print(f"Test mode: Using {n_test_samples} samples from dataset")
                     data = data[:n_test_samples]
 
-            # Create dataset with numpy arrays (not strings)
-            # The data is already preprocessed, so the transform is simple
+            # Get the input size from the first data item
+            if len(data) > 0:
+                input_shape = data[0]['data'].shape
+                print(f"Data input shape: {input_shape}")
+
+                # Update config with actual data dimensions
+                if len(input_shape) == 3:  # 3D data
+                    config['dataset']['input_size'] = list(input_shape)
+
+            # Create dataset
             full_dataset = DoseAEDataset(
-                image_list=[np.array(item['data']) for item in data],
+                image_list=[item['data'] for item in data],  # Removed np.expand_dims here
                 transform=ToTensor()
             )
-        except Exception as e:
-            print(f"Error loading data from pickle: {e}")
-            raise e
-    else:
-        # If no pickle file is provided, raise an error
-        raise ValueError(
-            "No data_pkl path provided in config or file does not exist. Please provide a valid path to preprocessed data.")
 
-    # Calculate dataset sizes
-    dataset_size = len(full_dataset)
-    train_size = int(config['dataset']['train_ratio'] * dataset_size)
-    val_size = int(config['dataset']['val_ratio'] * dataset_size)
-    test_size = dataset_size - train_size - val_size
+            print(f"Dataset created with {len(full_dataset)} samples")
+        else:
+            # If no pickle file is provided, raise an error
+            raise ValueError(
+                "No data_pkl path provided in config or file does not exist. Please provide a valid path to preprocessed data.")
 
-    # Split dataset
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(config['training']['seed'])
-    )
+        # Calculate dataset sizes
+        dataset_size = len(full_dataset)
+        train_size = int(config['dataset']['train_ratio'] * dataset_size)
+        val_size = int(config['dataset']['val_ratio'] * dataset_size)
+        test_size = dataset_size - train_size - val_size
 
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
+        # Split dataset
+        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size, test_size],
+            generator=torch.Generator().manual_seed(config['training']['seed'])
+        )
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
+        # Create train data loader
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['hyperparameters']['batch_size'],
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
+        # Create validation data loader
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config['hyperparameters']['batch_size'],
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
 
-    return {
-        'train': train_loader,
-        'val': val_loader,
-        'test': test_loader
-    }
+        # Create test data loader
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config['hyperparameters']['batch_size'],
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        # Print debug info about data loaders
+        print(
+            f"Created data loaders - train: {len(train_loader)} batches, val: {len(val_loader)} batches, test: {len(test_loader)} batches")
+
+        return {
+            'train': train_loader,
+            'val': val_loader,
+            'test': test_loader
+        }
+    except Exception as e:
+        print(f"Error in create_data_loaders: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 

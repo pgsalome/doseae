@@ -1,0 +1,16 @@
+{"time":"2025-04-26T23:33:59.109189523+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/home/e210/git/doseae/wandb/run-20250426_233359-xt1i32rm/logs/debug-core.log"}
+{"time":"2025-04-26T23:33:59.383053324+02:00","level":"INFO","msg":"created new stream","id":"xt1i32rm"}
+{"time":"2025-04-26T23:33:59.383113982+02:00","level":"INFO","msg":"stream: started","id":"xt1i32rm"}
+{"time":"2025-04-26T23:33:59.383188405+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:33:59.383202942+02:00","level":"INFO","msg":"handler: started","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:33:59.383230042+02:00","level":"INFO","msg":"sender: started","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:33:59.838580773+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-04-26T23:34:24.694276544+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-04-26T23:34:24.694381509+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-04-26T23:34:25.269826495+02:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-04-26T23:34:25.472416211+02:00","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2025-04-26T23:34:25.477800005+02:00","level":"INFO","msg":"stream: closing","id":"xt1i32rm"}
+{"time":"2025-04-26T23:34:25.477840792+02:00","level":"INFO","msg":"handler: closed","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:34:25.477861415+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:34:25.47790607+02:00","level":"INFO","msg":"sender: closed","stream_id":"xt1i32rm"}
+{"time":"2025-04-26T23:34:25.477992025+02:00","level":"INFO","msg":"stream: closed","id":"xt1i32rm"}

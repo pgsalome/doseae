@@ -1,0 +1,16 @@
+{"time":"2025-04-26T23:32:45.007022793+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/home/e210/git/doseae/wandb/run-20250426_233245-clvxvm5u/logs/debug-core.log"}
+{"time":"2025-04-26T23:32:45.271878618+02:00","level":"INFO","msg":"created new stream","id":"clvxvm5u"}
+{"time":"2025-04-26T23:32:45.271936457+02:00","level":"INFO","msg":"stream: started","id":"clvxvm5u"}
+{"time":"2025-04-26T23:32:45.271978619+02:00","level":"INFO","msg":"sender: started","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:32:45.272008143+02:00","level":"INFO","msg":"handler: started","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:32:45.271968622+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:32:45.729986628+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-04-26T23:33:10.608146248+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-04-26T23:33:10.608241906+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-04-26T23:33:11.191553059+02:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-04-26T23:33:11.393765415+02:00","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2025-04-26T23:33:11.399315048+02:00","level":"INFO","msg":"stream: closing","id":"clvxvm5u"}
+{"time":"2025-04-26T23:33:11.399356986+02:00","level":"INFO","msg":"handler: closed","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:33:11.399378251+02:00","level":"INFO","msg":"writer: Close: closed","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:33:11.399395736+02:00","level":"INFO","msg":"sender: closed","stream_id":"clvxvm5u"}
+{"time":"2025-04-26T23:33:11.399482399+02:00","level":"INFO","msg":"stream: closed","id":"clvxvm5u"}

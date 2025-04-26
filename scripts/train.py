@@ -608,7 +608,7 @@ def train(config):
         config (dict): Configuration
 
     Returns:
-        nn.Module: Trained model
+        tuple: (model, validation_loss)
     """
     # Set device
     device = torch.device(f"cuda:{config['training']['gpu_id']}" if torch.cuda.is_available() else "cpu")
@@ -626,19 +626,11 @@ def train(config):
     # Create model
     model = get_model(config).to(device)
     print(f"Model: {config['model']['type']}")
-    print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
     scheduler = create_scheduler(optimizer, config)
-
-    # Gradient accumulation steps
-    accumulation_steps = config.get('training', {}).get('accumulation_steps', 1)
-
-    # Early stopping parameters
-    best_val_loss = float('inf')
-    early_stop_counter = 0
-    early_stop_patience = config['hyperparameters']['early_stopping_patience']
 
     # Initialize wandb if enabled
     if config['wandb']['use_wandb']:
@@ -646,7 +638,8 @@ def train(config):
             project=config['wandb']['project_name'],
             entity=config['wandb']['entity'],
             name=config.get('wandb', {}).get('name', None),
-            config=config
+            config=config,
+            dir=os.path.join(config['output']['results_dir'], 'wandb')
         )
         wandb.watch(model)
 
@@ -655,12 +648,17 @@ def train(config):
     os.makedirs(config['output']['log_dir'], exist_ok=True)
     os.makedirs(config['output']['results_dir'], exist_ok=True)
 
+    # Training variables
+    best_val_loss = float('inf')
+    early_stop_counter = 0
+    early_stop_patience = config['hyperparameters']['early_stopping_patience']
+
     # Training loop
     for epoch in range(config['hyperparameters']['epochs']):
         print(f"\nEpoch {epoch + 1}/{config['hyperparameters']['epochs']}")
 
         # Train
-        train_loss = train_epoch(model, data_loaders['train'], optimizer, device, config, accumulation_steps)
+        train_loss = train_epoch(model, data_loaders['train'], optimizer, device, config)
 
         # Validate
         val_loss = validate(model, data_loaders['val'], device, config)
@@ -669,7 +667,11 @@ def train(config):
         print(f"Train Loss: {train_loss:.6f}, Validation Loss: {val_loss:.6f}")
 
         # Update scheduler
-        adjust_learning_rate(scheduler, optimizer, val_loss, epoch)
+        if scheduler:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
 
         # Early stopping check
         if val_loss < best_val_loss:
@@ -679,29 +681,15 @@ def train(config):
             # Save best model
             model_type = config['model']['type']
             save_path = os.path.join(config['output']['model_dir'], f'{model_type}_best_model.pth')
-            save_model(model, save_path)
+            torch.save(model.state_dict(), save_path)
 
-            if config['wandb']['use_wandb']:
-                wandb.save(save_path)
-
-            print(f"Validation loss improved to {best_val_loss:.6f}, saving model.")
+            print(f"Validation loss improved to {best_val_loss:.6f}, saving model")
         else:
             early_stop_counter += 1
-            print(f"No improvement in validation loss for {early_stop_counter} epochs.")
+            print(f"No improvement in validation loss for {early_stop_counter} epochs")
             if early_stop_counter >= early_stop_patience:
-                print(f"Early stopping triggered after {epoch + 1} epochs!")
+                print(f"Early stopping triggered after {epoch + 1} epochs")
                 break
-
-        # Visualize reconstructions
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            visualize_reconstructions(
-                model,
-                data_loaders['val'],
-                device,
-                config,
-                epoch + 1,
-                config['output']['results_dir']
-            )
 
         # Log to wandb if enabled
         if config['wandb']['use_wandb']:
@@ -712,21 +700,11 @@ def train(config):
                 'learning_rate': optimizer.param_groups[0]['lr']
             })
 
-    # Save final model
-    model_type = config['model']['type']
-    save_path = os.path.join(config['output']['model_dir'], f'{model_type}_final_model.pth')
-    save_model(model, save_path)
-
-    # Evaluate on test set
-    test_loss = validate(model, data_loaders['test'], device, config)
-    print(f"\nTest Loss: {test_loss:.6f}")
-
-    # Log final test loss to wandb if enabled
+    # Close wandb if enabled
     if config['wandb']['use_wandb']:
-        wandb.log({'test_loss': test_loss})
         wandb.finish()
 
-    return model
+    return model, best_val_loss
 
 
 def hyperparameter_optimization(config):

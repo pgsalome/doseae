@@ -1,0 +1,11 @@
+{"time":"2025-04-26T23:27:16.204294176+02:00","level":"INFO","msg":"stream: starting","core version":"0.19.10","symlink path":"/home/e210/git/doseae/wandb/run-20250426_232716-g7h94mog/logs/debug-core.log"}
+{"time":"2025-04-26T23:27:16.471315184+02:00","level":"INFO","msg":"created new stream","id":"g7h94mog"}
+{"time":"2025-04-26T23:27:16.471378031+02:00","level":"INFO","msg":"stream: started","id":"g7h94mog"}
+{"time":"2025-04-26T23:27:16.471407991+02:00","level":"INFO","msg":"writer: Do: started","stream_id":"g7h94mog"}
+{"time":"2025-04-26T23:27:16.471488449+02:00","level":"INFO","msg":"sender: started","stream_id":"g7h94mog"}
+{"time":"2025-04-26T23:27:16.471419785+02:00","level":"INFO","msg":"handler: started","stream_id":"g7h94mog"}
+{"time":"2025-04-26T23:27:16.935090049+02:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-04-26T23:27:17.019987586+02:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-04-26T23:27:17.020057449+02:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-04-26T23:27:17.478135486+02:00","level":"INFO","msg":"stream: closing","id":"g7h94mog"}
+{"time":"2025-04-26T23:27:17.643184216+02:00","level":"WARN","msg":"sender: received Exit record more than once, ignoring"}
