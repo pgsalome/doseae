@@ -67,3 +67,123 @@ class VAE(BaseAutoencoder):
             DeconvBlock(base_filters, in_channels, kernel_size=4, stride=2, padding=1, activation=nn.Sigmoid()),
             # [batch, in_channels, D, H, W]
         )
+
+    def encode(self, x):
+        """
+        Encode input into latent space parameters.
+
+        Args:
+            x (torch.Tensor): Input tensor [B, C, D, H, W]
+
+        Returns:
+            tuple: Mean and log variance of the latent distribution
+        """
+        # Pass through encoder
+        h = self.encoder(x)
+
+        # Flatten
+        h_flat = h.view(h.size(0), -1)
+
+        # Check that the flattened size matches what we expect
+        if h_flat.size(1) != self.flatten_size:
+            raise ValueError(f"Expected encoder output size {self.flatten_size}, got {h_flat.size(1)}")
+
+        # Get mean and log variance
+        mu = self.fc_mu(h_flat)
+        logvar = self.fc_logvar(h_flat)
+
+        return mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        """
+        Reparameterization trick to sample from the latent distribution.
+
+        Args:
+            mu (torch.Tensor): Mean of the latent distribution
+            logvar (torch.Tensor): Log variance of the latent distribution
+
+        Returns:
+            torch.Tensor: Sampled latent vectors
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        """
+        Decode from latent space to output space.
+
+        Args:
+            z (torch.Tensor): Latent representation
+
+        Returns:
+            torch.Tensor: Decoded output
+        """
+        # Project to flattened size
+        h = self.fc_decoder(z)
+
+        # Pass through decoder
+        recon_x = self.decoder(h)
+
+        return recon_x
+
+    def forward(self, x):
+        """
+        Forward pass through the VAE.
+
+        Args:
+            x (torch.Tensor): Input tensor [B, C, D, H, W]
+
+        Returns:
+            tuple: Reconstructed output, mean, and log variance
+        """
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        recon_x = self.decode(z)
+
+        return recon_x, mu, logvar
+
+    def get_losses(self, x, x_recon, mu, logvar, beta=1.0):
+        """
+        Calculate VAE loss components.
+
+        Args:
+            x (torch.Tensor): Original input
+            x_recon (torch.Tensor): Reconstructed input
+            mu (torch.Tensor): Mean of the latent distribution
+            logvar (torch.Tensor): Log variance of the latent distribution
+            beta (float): Weight for the KL divergence term
+
+        Returns:
+            dict: Dictionary of loss components
+        """
+        # Reconstruction loss (MSE or BCE)
+        recon_loss = F.mse_loss(x_recon, x, reduction='mean')
+
+        # KL divergence
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        kl_loss = kl_loss / x.size(0)  # Normalize by batch size
+
+        # Total loss
+        total_loss = recon_loss + beta * kl_loss
+
+        return {
+            'recon_loss': recon_loss,
+            'kl_loss': kl_loss,
+            'total_loss': total_loss
+        }
+
+    def reconstruct(self, x):
+        """
+        Reconstruct the input (without sampling, for deterministic output).
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Reconstructed output
+        """
+        with torch.no_grad():
+            mu, logvar = self.encode(x)
+            z = mu  # Use mean instead of sampling
+            return self.decode(z)

@@ -3,40 +3,35 @@ import torch
 import optuna
 import yaml
 import copy
-
 import wandb
-
 from models import get_model
 from data.dataset import create_data_loaders
 
 
 def define_model_params(trial, base_config):
-    """
-    Define hyperparameters to search over for the model.
-
-    Args:
-        trial (optuna.Trial): Optuna trial object
-        base_config (dict): Base configuration to modify
-
-    Returns:
-        dict: Modified configuration
-    """
     config = copy.deepcopy(base_config)
 
-    # Model architecture
-    config['model']['type'] = trial.suggest_categorical(
-        'model_type', ['vae', 'resnet_ae', 'unet_ae']
-    )
+    # Use the model type that's already set in the config
+    model_type = config['model']['type'].lower()
+    print(f"Using model type from config: {model_type}")
 
-    # Latent dimension
-    config['model']['latent_dim'] = trial.suggest_int(
-        'latent_dim', 32, 512, log=True
-    )
+    # Set parameters based on model type
+    if model_type == 'vae':
+        # For VAE, use compatible dimensions
+        base_filters = trial.suggest_int('base_filters', 16, 64, log=True)
+        config['model']['base_filters'] = base_filters
 
-    # Base filters
-    config['model']['base_filters'] = trial.suggest_int(
-        'base_filters', 16, 64, log=True
-    )
+        # Ensure latent_dim is compatible with the encoded size
+        encoded_size = 4 * 4 * 4  # Size after 4 layers of strided convolutions
+        max_features = base_filters * 8 * encoded_size
+        config['model']['latent_dim'] = trial.suggest_int(
+            'latent_dim', 32, max_features, log=True)
+    else:
+        # For other models, use more flexible parameters
+        config['model']['latent_dim'] = trial.suggest_int(
+            'latent_dim', 32, 512, log=True)
+        config['model']['base_filters'] = trial.suggest_int(
+            'base_filters', 16, 64, log=True)
 
     return config
 
@@ -44,11 +39,9 @@ def define_model_params(trial, base_config):
 def define_training_params(trial, base_config):
     """
     Define hyperparameters to search over for training.
-
     Args:
         trial (optuna.Trial): Optuna trial object
         base_config (dict): Base configuration to modify
-
     Returns:
         dict: Modified configuration
     """
@@ -69,15 +62,22 @@ def define_training_params(trial, base_config):
         'weight_decay', 1e-6, 1e-3, log=True
     )
 
-    # Beta for VAE
-    if config['model']['type'] == 'vae':
-        config['hyperparameters']['beta'] = trial.suggest_float(
-            'beta', 0.1, 10.0, log=True
-        )
-
     # Optimizer
     config['training']['optimizer'] = trial.suggest_categorical(
         'optimizer', ['adam', 'sgd', 'rmsprop']
+    )
+
+    # Scheduler
+    config['training']['scheduler'] = trial.suggest_categorical(
+        'scheduler', ['reduce_on_plateau', 'cosine_annealing', 'none']
+    )
+
+    # Normalization and output activation
+    config['preprocessing']['normalize'] = trial.suggest_categorical(
+        'normalize', [True, False]
+    )
+    config['preprocessing']['use_tanh_output'] = trial.suggest_categorical(
+        'use_tanh_output', [True, False]
     )
 
     return config
@@ -90,8 +90,9 @@ def objective(trial, base_config, device):
         config = define_model_params(trial, base_config)
         config = define_training_params(trial, config)
 
-        # Save model_type for later use
+        # Make sure we're using the correct model type
         model_type = config['model']['type'].lower()
+        print(f"Using model type from config: {model_type}")
 
         # Create model
         print("Creating model...")
@@ -173,6 +174,7 @@ def objective(trial, base_config, device):
             # Training
             model.train()
             train_loss = 0.0
+            train_batches = 0
 
             for batch_idx, batch in enumerate(data_loaders['train']):
                 try:
@@ -186,38 +188,49 @@ def objective(trial, base_config, device):
                     # Training step
                     optimizer.zero_grad()
 
-                    # Forward pass
-                    if 'vae' in model_type:
-                        recon, mu, logvar = model(data)
-                        loss_dict = model.get_losses(
-                            data, recon, mu, logvar,
-                            beta=config['hyperparameters'].get('beta', 1.0)
-                        )
-                        loss = loss_dict['total_loss']
-                    else:
-                        output = model(data)
-                        if isinstance(output, tuple):
-                            recon = output[0]
-                            loss = torch.nn.functional.mse_loss(recon, data)
+                    # Forward pass - safely handle different model outputs
+                    try:
+                        if model_type == 'vae':
+                            recon, mu, logvar = model(data)
+                            loss_dict = model.get_losses(
+                                data, recon, mu, logvar,
+                                beta=config['hyperparameters'].get('beta', 1.0)
+                            )
+                            loss = loss_dict['total_loss']
                         else:
-                            loss = torch.nn.functional.mse_loss(output, data)
+                            outputs = model(data)
 
-                    # Backward and optimize
-                    loss.backward()
-                    optimizer.step()
+                            # Handle both tuple outputs and direct outputs
+                            if isinstance(outputs, tuple):
+                                recon = outputs[0]
+                            else:
+                                recon = outputs
 
-                    train_loss += loss.item()
+                            # Calculate MSE loss
+                            loss = torch.nn.functional.mse_loss(recon, data)
+
+                        # Backward and optimize
+                        loss.backward()
+                        optimizer.step()
+
+                        train_loss += loss.item()
+                        train_batches += 1
+
+                    except RuntimeError as e:
+                        if 'CUDA out of memory' in str(e):
+                            print(f"CUDA OOM in batch {batch_idx}, skipping")
+                            # Try to free up memory
+                            torch.cuda.empty_cache()
+                            continue
+                        else:
+                            raise e
+
                 except Exception as e:
                     print(f"Error in training batch {batch_idx}: {e}")
-                    if 'CUDA out of memory' in str(e):
-                        # Try to free up memory
-                        del data
-                        if 'recon' in locals(): del recon
-                        if 'mu' in locals(): del mu
-                        if 'logvar' in locals(): del logvar
-                        if 'output' in locals(): del output
-                        torch.cuda.empty_cache()
                     return float('inf')
+
+            # Calculate average training loss
+            avg_train_loss = train_loss / train_batches if train_batches > 0 else float('inf')
 
             # Quick validation
             model.eval()
@@ -226,9 +239,6 @@ def objective(trial, base_config, device):
 
             with torch.no_grad():
                 for batch_idx, batch in enumerate(data_loaders['val']):
-                    if batch_idx >= 2:  # Just check a couple batches
-                        break
-
                     try:
                         # Handle different dataset types
                         if isinstance(batch, dict):  # For DoseAEDataset
@@ -237,8 +247,8 @@ def objective(trial, base_config, device):
                             data, _ = batch
                             data = data.to(device)
 
-                        # Forward pass
-                        if 'vae' in model_type:
+                        # Forward pass - safely handle different model outputs
+                        if model_type == 'vae':
                             recon, mu, logvar = model(data)
                             loss_dict = model.get_losses(
                                 data, recon, mu, logvar,
@@ -246,32 +256,44 @@ def objective(trial, base_config, device):
                             )
                             loss = loss_dict['total_loss']
                         else:
-                            output = model(data)
-                            if isinstance(output, tuple):
-                                recon = output[0]
-                                loss = torch.nn.functional.mse_loss(recon, data)
+                            outputs = model(data)
+
+                            # Handle both tuple outputs and direct outputs
+                            if isinstance(outputs, tuple):
+                                recon = outputs[0]
                             else:
-                                loss = torch.nn.functional.mse_loss(output, data)
+                                recon = outputs
+
+                            # Calculate MSE loss
+                            loss = torch.nn.functional.mse_loss(recon, data)
 
                         val_loss += loss.item()
                         val_batches += 1
+
                     except Exception as e:
                         print(f"Error in validation batch {batch_idx}: {e}")
                         return float('inf')
 
-            val_loss = val_loss / val_batches if val_batches > 0 else float('inf')
+            # Calculate average validation loss
+            avg_val_loss = val_loss / val_batches if val_batches > 0 else float('inf')
 
             # Log to wandb
             if config['wandb']['use_wandb']:
                 wandb.log({
                     'epoch': epoch,
-                    'train_loss': train_loss / len(data_loaders['train']),
-                    'val_loss': val_loss
+                    'train_loss': avg_train_loss,
+                    'val_loss': avg_val_loss
                 })
 
+            # Update scheduler if using ReduceLROnPlateau
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_val_loss)
+            elif scheduler is not None:
+                scheduler.step()
+
             # Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -289,5 +311,3 @@ def objective(trial, base_config, device):
         if config['wandb']['use_wandb'] and wandb.run is not None:
             wandb.finish()
         return float('inf')
-
-

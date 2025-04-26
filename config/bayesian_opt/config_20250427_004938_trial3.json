@@ -45,7 +45,7 @@
     "non_zero_threshold": 0.05,
     "num_workers": 8,
     "batch_size": 1000,
-    "use_tanh_output": true
+    "use_tanh_output": false
   },
   "transforms": {
     "augment": true,
@@ -72,23 +72,23 @@
   "model": {
     "type": "unet_ae",
     "is_2d": false,
-    "latent_dim": 184,
+    "latent_dim": 60,
     "in_channels": 1,
-    "base_filters": 33,
+    "base_filters": 17,
     "bottleneck_filters": 256,
     "dropout_rate": 0.3
   },
   "hyperparameters": {
-    "learning_rate": 1.865818136012483e-05,
-    "batch_size": 8,
+    "learning_rate": 7.40038575908737e-05,
+    "batch_size": 16,
     "epochs": 100,
     "early_stopping_patience": 10,
-    "weight_decay": 5.924870051994317e-05,
+    "weight_decay": 0.00041151130495610907,
     "beta": 1.0
   },
   "training": {
-    "optimizer": "adam",
-    "scheduler": "cosine_annealing",
+    "optimizer": "rmsprop",
+    "scheduler": "none",
     "loss": "mse",
     "gpu_id": 0,
     "seed": 42,
@@ -100,11 +100,11 @@
     "use_wandb": true,
     "project_name": "dose_distribution_autoencoder",
     "entity": "pgsalome",
-    "name": "trial_5",
-    "group": "opt_20250427_001458",
+    "name": "trial_3",
+    "group": "opt_20250427_004938",
     "tags": [
       "optimization",
-      "trial_5"
+      "trial_3"
     ]
   },
   "optuna": {
@@ -120,5 +120,5 @@
     "log_dir": "/media/e210/HD81/Adhvaith_datasets/results/logs",
     "results_dir": "/media/e210/HD81/Adhvaith_datasets/results"
   },
-  "trial_num": 5
+  "trial_num": 3
 }

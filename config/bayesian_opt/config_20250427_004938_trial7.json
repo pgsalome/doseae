@@ -72,23 +72,23 @@
   "model": {
     "type": "unet_ae",
     "is_2d": false,
-    "latent_dim": 143,
+    "latent_dim": 338,
     "in_channels": 1,
-    "base_filters": 19,
+    "base_filters": 24,
     "bottleneck_filters": 256,
     "dropout_rate": 0.3
   },
   "hyperparameters": {
-    "learning_rate": 0.002550298070162891,
+    "learning_rate": 3.22461774864237e-05,
     "batch_size": 16,
     "epochs": 100,
     "early_stopping_patience": 10,
-    "weight_decay": 1.0388823104027941e-06,
+    "weight_decay": 1.9567235921447345e-06,
     "beta": 1.0
   },
   "training": {
-    "optimizer": "adam",
-    "scheduler": "reduce_on_plateau",
+    "optimizer": "sgd",
+    "scheduler": "cosine_annealing",
     "loss": "mse",
     "gpu_id": 0,
     "seed": 42,
@@ -100,11 +100,11 @@
     "use_wandb": true,
     "project_name": "dose_distribution_autoencoder",
     "entity": "pgsalome",
-    "name": "trial_2",
-    "group": "opt_20250427_001458",
+    "name": "trial_7",
+    "group": "opt_20250427_004938",
     "tags": [
       "optimization",
-      "trial_2"
+      "trial_7"
     ]
   },
   "optuna": {
@@ -120,5 +120,5 @@
     "log_dir": "/media/e210/HD81/Adhvaith_datasets/results/logs",
     "results_dir": "/media/e210/HD81/Adhvaith_datasets/results"
   },
-  "trial_num": 2
+  "trial_num": 7
 }

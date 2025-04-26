@@ -26,7 +26,7 @@
     "n_test_samples": 20
   },
   "preprocessing": {
-    "normalize": true,
+    "normalize": false,
     "normalize_method": "95percentile",
     "percentile_norm": 95,
     "voxel_spacing": [
@@ -45,7 +45,7 @@
     "non_zero_threshold": 0.05,
     "num_workers": 8,
     "batch_size": 1000,
-    "use_tanh_output": true
+    "use_tanh_output": false
   },
   "transforms": {
     "augment": true,
@@ -72,22 +72,22 @@
   "model": {
     "type": "unet_ae",
     "is_2d": false,
-    "latent_dim": 101,
+    "latent_dim": 82,
     "in_channels": 1,
-    "base_filters": 21,
+    "base_filters": 18,
     "bottleneck_filters": 256,
     "dropout_rate": 0.3
   },
   "hyperparameters": {
-    "learning_rate": 2.2887381144600954e-05,
-    "batch_size": 16,
+    "learning_rate": 0.0059440281134109305,
+    "batch_size": 8,
     "epochs": 100,
     "early_stopping_patience": 10,
-    "weight_decay": 0.00012854549964879015,
+    "weight_decay": 4.630228617122102e-05,
     "beta": 1.0
   },
   "training": {
-    "optimizer": "sgd",
+    "optimizer": "adam",
     "scheduler": "cosine_annealing",
     "loss": "mse",
     "gpu_id": 0,
@@ -100,11 +100,11 @@
     "use_wandb": true,
     "project_name": "dose_distribution_autoencoder",
     "entity": "pgsalome",
-    "name": "trial_4",
-    "group": "opt_20250427_001458",
+    "name": "trial_5",
+    "group": "opt_20250427_004938",
     "tags": [
       "optimization",
-      "trial_4"
+      "trial_5"
     ]
   },
   "optuna": {
@@ -120,5 +120,5 @@
     "log_dir": "/media/e210/HD81/Adhvaith_datasets/results/logs",
     "results_dir": "/media/e210/HD81/Adhvaith_datasets/results"
   },
-  "trial_num": 4
+  "trial_num": 5
 }
