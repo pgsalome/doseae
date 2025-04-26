@@ -3,12 +3,11 @@ import torch
 import optuna
 import yaml
 import copy
-from optuna.pruners import MedianPruner
-from optuna.samplers import TPESampler, RandomSampler
+
 import wandb
 
-from ..models import get_model
-from ..data.dataset import create_data_loaders
+from models import get_model
+from data.dataset import create_data_loaders
 
 
 def define_model_params(trial, base_config):

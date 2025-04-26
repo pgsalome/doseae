@@ -1,6 +1,6 @@
 dataset:
   data_dir: '/media/e210/HD81/Adhvaith_datasets/nsclc_public'
-  data_pkl: null  # Will be updated automatically after preprocessing
+  data_pkl: '/media/e210/HD81/Adhvaith_datasets/results/datasets/test_20/volumes_dataset.pkl'
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1

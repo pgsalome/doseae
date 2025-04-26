@@ -118,6 +118,7 @@ class Resize2DImage(object):
 class RandomRotation(object):
     """
     Randomly rotate the image by a specified range of angles.
+    Supports both 2D and 3D data.
 
     Args:
         max_angle (float): Maximum rotation angle in degrees
@@ -129,66 +130,77 @@ class RandomRotation(object):
     def __call__(self, sample):
         image = sample["image"]
 
+        # Handle 3D data (volumes)
+        if isinstance(image, np.ndarray) and image.ndim > 3:
+            # For 3D, return original - 3D rotation is complex
+            return {"image": image, "zc": sample.get("zc", 0)}
+
+        if isinstance(image, torch.Tensor) and image.ndim > 3:
+            # For 3D tensors, return original
+            return {"image": image, "zc": sample.get("zc", 0)}
+
+        # Convert tensor to numpy if needed
+        if isinstance(image, torch.Tensor):
+            is_tensor = True
+            device = image.device
+            image = image.cpu().numpy()
+        else:
+            is_tensor = False
+
         # Generate random angle
         angle = np.random.uniform(-self.max_angle, self.max_angle)
 
-        # Get image dimensions
-        if image.ndim == 3:  # [C, H, W]
-            h, w = image.shape[1], image.shape[2]
-            image = np.transpose(image, (1, 2, 0))  # [H, W, C]
-        else:  # [H, W]
-            h, w = image.shape
+        try:
+            # Get image dimensions based on shape
+            if image.ndim == 2:  # [H, W]
+                h, w = image.shape
+                image_to_rotate = image
+            elif image.ndim == 3:
+                if image.shape[0] in [1, 3]:  # [C, H, W]
+                    h, w = image.shape[1], image.shape[2]
+                    image_to_rotate = np.transpose(image, (1, 2, 0))  # [H, W, C]
+                else:  # Assuming [D, H, W] - handle as 3D volume
+                    # Return original for 3D volumes
+                    if is_tensor:
+                        return {"image": torch.tensor(image, device=device), "zc": sample.get("zc", 0)}
+                    return {"image": image, "zc": sample.get("zc", 0)}
+            else:
+                # Return original for other dimensions
+                if is_tensor:
+                    return {"image": torch.tensor(image, device=device), "zc": sample.get("zc", 0)}
+                return {"image": image, "zc": sample.get("zc", 0)}
 
-        # Calculate rotation matrix
-        center = (w // 2, h // 2)
-        rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+            # Calculate rotation matrix
+            center = (w // 2, h // 2)
+            rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
 
-        # Apply rotation
-        if image.ndim == 3:  # [H, W, C]
-            rotated = cv2.warpAffine(image, rotation_matrix, (w, h))
-            rotated = np.transpose(rotated, (2, 0, 1))  # [C, H, W]
-        else:  # [H, W]
-            rotated = cv2.warpAffine(image, rotation_matrix, (w, h))
-
-        return {"image": rotated, "zc": sample.get("zc", 0)}
-
-
-class RandomFlip(object):
-    """
-    Randomly flip the image horizontally and/or vertically.
-
-    Args:
-        p_h (float): Probability of horizontal flip
-        p_v (float): Probability of vertical flip
-    """
-
-    def __init__(self, p_h=0.5, p_v=0.5):
-        self.p_h = p_h
-        self.p_v = p_v
-
-    def __call__(self, sample):
-        image = sample["image"]
-
-        # Horizontal flip
-        if np.random.random() < self.p_h:
-            if image.ndim == 3:  # [C, H, W]
-                image = np.flip(image, axis=2)
+            # Apply rotation
+            if image.ndim == 3 and image.shape[0] in [1, 3]:  # [C, H, W]
+                rotated = cv2.warpAffine(image_to_rotate, rotation_matrix, (w, h))
+                rotated = np.transpose(rotated, (2, 0, 1))  # [C, H, W]
             else:  # [H, W]
-                image = np.flip(image, axis=1)
+                rotated = cv2.warpAffine(image_to_rotate, rotation_matrix, (w, h))
 
-        # Vertical flip
-        if np.random.random() < self.p_v:
-            if image.ndim == 3:  # [C, H, W]
-                image = np.flip(image, axis=1)
-            else:  # [H, W]
-                image = np.flip(image, axis=0)
+            # Convert back to tensor if input was tensor
+            if is_tensor:
+                rotated = torch.tensor(rotated, device=device)
 
-        return {"image": image, "zc": sample.get("zc", 0)}
+            return {"image": rotated, "zc": sample.get("zc", 0)}
+        except Exception as e:
+            print(f"Error in RandomRotation: {e}")
+            # Return original data on error
+            if is_tensor:
+                return {"image": torch.tensor(image, device=device), "zc": sample.get("zc", 0)}
+            return {"image": image, "zc": sample.get("zc", 0)}
+
+
+
 
 
 class RandomBrightness(object):
     """
     Randomly adjust the brightness of the image.
+    Works with any dimensionality of data.
 
     Args:
         factor_range (tuple): Range of brightness adjustment factor
@@ -200,13 +212,18 @@ class RandomBrightness(object):
     def __call__(self, sample):
         image = sample["image"]
 
-        # Generate random factor
-        factor = np.random.uniform(self.factor_range[0], self.factor_range[1])
+        try:
+            # Generate random factor
+            factor = np.random.uniform(self.factor_range[0], self.factor_range[1])
 
-        # Apply brightness adjustment
-        adjusted = image * factor
+            # Apply brightness adjustment (works with any dimensionality)
+            adjusted = image * factor
 
-        return {"image": adjusted, "zc": sample.get("zc", 0)}
+            return {"image": adjusted, "zc": sample.get("zc", 0)}
+
+        except Exception as e:
+            print(f"Error in RandomBrightness: {e}")
+            return {"image": image, "zc": sample.get("zc", 0)}
 
 
 def get_transforms(config=None):
@@ -242,20 +259,158 @@ def get_transforms(config=None):
         transform_list.append(Resize2DImage(config.get('dataset', {}).get('input_size_2d', 256)))
 
     # Add data augmentation transforms if enabled
-    if config.get('preprocessing', {}).get('augment', False):
+    if config.get('transforms', {}).get('augment', False):
         # Add random rotation
-        if config.get('preprocessing', {}).get('rotate', False):
+        if config.get('transforms', {}).get('rotate', False):
             transform_list.append(RandomRotation(max_angle=10.0))
 
         # Add random flip
-        if config.get('preprocessing', {}).get('flip', False):
+        if config.get('transforms', {}).get('flip', False):
             transform_list.append(RandomFlip(p_h=0.5, p_v=0.5))
 
         # Add random brightness adjustment
-        if config.get('preprocessing', {}).get('adjust_brightness', False):
+        if config.get('transforms', {}).get('adjust_brightness', False):
             transform_list.append(RandomBrightness(factor_range=(0.8, 1.2)))
 
     # Always add ToTensor as the last transform
     transform_list.append(ToTensor())
 
     return transforms.Compose(transform_list)
+
+
+class RandomFlip(object):
+    """
+    Randomly flip the image horizontally and/or vertically.
+    Supports both 2D and 3D data.
+
+    Args:
+        p_h (float): Probability of horizontal flip
+        p_v (float): Probability of vertical flip
+    """
+
+    def __init__(self, p_h=0.5, p_v=0.5):
+        self.p_h = p_h
+        self.p_v = p_v
+
+    def __call__(self, sample):
+        image = sample["image"]
+
+        # Convert tensor to numpy if needed
+        if isinstance(image, torch.Tensor):
+            is_tensor = True
+            device = image.device
+            image = image.cpu().numpy()
+        else:
+            is_tensor = False
+
+        try:
+            # Make a copy to ensure we don't have negative strides
+            image = image.copy()
+
+            # Handle different data dimensions
+            if image.ndim == 2:  # [H, W]
+                # 2D image
+                if np.random.random() < self.p_h:
+                    image = np.flip(image, axis=1).copy()  # Horizontal flip
+                if np.random.random() < self.p_v:
+                    image = np.flip(image, axis=0).copy()  # Vertical flip
+
+            elif image.ndim == 3:
+                if image.shape[0] in [1, 3]:  # [C, H, W]
+                    # 2D image with channels
+                    if np.random.random() < self.p_h:
+                        image = np.flip(image, axis=2).copy()  # Horizontal flip
+                    if np.random.random() < self.p_v:
+                        image = np.flip(image, axis=1).copy()  # Vertical flip
+                else:  # [D, H, W]
+                    # 3D volume - flip along each axis with different probabilities
+                    if np.random.random() < self.p_h:
+                        image = np.flip(image, axis=2).copy()  # Depth-wise flip
+                    if np.random.random() < self.p_v:
+                        image = np.flip(image, axis=1).copy()  # Height-wise flip
+
+            elif image.ndim == 4:  # [C, D, H, W]
+                # 3D volume with channels
+                if np.random.random() < self.p_h:
+                    image = np.flip(image, axis=3).copy()  # Width-wise flip
+                if np.random.random() < self.p_v:
+                    image = np.flip(image, axis=2).copy()  # Height-wise flip
+
+            elif image.ndim == 5:  # [B, C, D, H, W]
+                # Batch of 3D volumes with channels
+                if np.random.random() < self.p_h:
+                    image = np.flip(image, axis=4).copy()  # Width-wise flip
+                if np.random.random() < self.p_v:
+                    image = np.flip(image, axis=3).copy()  # Height-wise flip
+
+            # Convert back to tensor if input was tensor
+            if is_tensor:
+                image = torch.tensor(image, device=device)
+
+            return {"image": image, "zc": sample.get("zc", 0)}
+
+        except Exception as e:
+            print(f"Error in RandomFlip: {e}")
+            # Return original on error
+            if is_tensor:
+                return {"image": torch.tensor(image, device=device), "zc": sample.get("zc", 0)}
+            return {"image": image, "zc": sample.get("zc", 0)}
+
+
+def augment_data(tensor):
+    """
+    Apply random augmentations to a tensor.
+    Safely handles both 2D and 3D data.
+
+    Args:
+        tensor (torch.Tensor): Input tensor to augment
+
+    Returns:
+        torch.Tensor: Augmented tensor
+    """
+    try:
+        # Make a copy to ensure contiguity
+        if isinstance(tensor, np.ndarray):
+            tensor = tensor.copy()
+        elif isinstance(tensor, torch.Tensor):
+            # Ensure tensor is contiguous
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+
+        # Get tensor shape information
+        tensor_shape = tensor.shape if hasattr(tensor, 'shape') else None
+
+        if tensor_shape is None:
+            return tensor
+
+        # Determine if this is 3D volume data
+        is_3d_volume = len(tensor_shape) > 3 or (len(tensor_shape) == 3 and tensor_shape[0] > 3)
+
+        # Create sample for transform functions
+        sample = {"image": tensor}
+
+        # Apply transformations based on data dimensionality
+        if is_3d_volume:
+            # For 3D data, only apply brightness adjustment which works for any dimensionality
+            if np.random.random() < 0.5:
+                sample = RandomBrightness(factor_range=(0.8, 1.2))(sample)
+
+            # For 3D data also apply flipping which has been updated to support 3D
+            if np.random.random() < 0.5:
+                sample = RandomFlip(p_h=0.5, p_v=0.5)(sample)
+        else:
+            # For 2D data, apply all transformations
+            if np.random.random() < 0.5:
+                sample = RandomRotation(max_angle=10.0)(sample)
+
+            if np.random.random() < 0.5:
+                sample = RandomFlip(p_h=0.5, p_v=0.5)(sample)
+
+            if np.random.random() < 0.5:
+                sample = RandomBrightness(factor_range=(0.8, 1.2))(sample)
+
+        return sample["image"]
+
+    except Exception as e:
+        print(f"Error in augment_data: {e}, returning original tensor")
+        return tensor

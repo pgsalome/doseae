@@ -14,7 +14,7 @@ from sklearn.model_selection import train_test_split
 import logging
 
 from models import get_model
-from data.dataset import create_data_loaders, create_data_loaders_from_numpy, DoseAEDataset
+from data.dataset import create_data_loaders
 from utils.optimization import objective as optuna_objective
 
 # Setup logging

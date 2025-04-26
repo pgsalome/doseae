@@ -5,9 +5,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import nrrd
+import pickle
 import re
-from .preprocess import normalize_tensor, augment_data
 
+from .preprocess import normalize_tensor
+from .transforms import augment_data
 
 def natural_sort(file_list):
     """
@@ -290,24 +292,34 @@ def create_data_loaders(config):
     Returns:
         dict: Dictionary containing DataLoaders for train, val, and test sets
     """
-    # Check if we're working with 2D or 3D data
-    is_2d = config.get('dataset', {}).get('is_2d_data', False)
+    # Check if we should use a preprocessed pickle file
+    if config.get('dataset', {}).get('data_pkl') and os.path.exists(config['dataset']['data_pkl']):
+        print(f"Loading data from pickle file: {config['dataset']['data_pkl']}")
+        try:
+            # Load the pickle file
+            with open(config['dataset']['data_pkl'], 'rb') as f:
+                data = pickle.load(f)
 
-    if is_2d:
-        # Create 2D dataset
-        full_dataset = DoseDistribution2DDataset(
-            data_dir=config['dataset']['data_dir'],
-            input_size=config['dataset']['input_size_2d'],
-            augment=config['preprocessing']['augment'],
-            use_patches=config.get('dataset', {}).get('use_patches', False)
-        )
+            # Check if we're in test mode to limit samples
+            if config.get('dataset', {}).get('test_mode', False):
+                n_test_samples = config.get('dataset', {}).get('n_test_samples', 20)
+                if len(data) > n_test_samples:
+                    print(f"Test mode: Using {n_test_samples} samples from dataset")
+                    data = data[:n_test_samples]
+
+            # Create dataset with numpy arrays (not strings)
+            # The data is already preprocessed, so the transform is simple
+            full_dataset = DoseAEDataset(
+                image_list=[np.array(item['data']) for item in data],
+                transform=ToTensor()
+            )
+        except Exception as e:
+            print(f"Error loading data from pickle: {e}")
+            raise e
     else:
-        # Create 3D dataset
-        full_dataset = DoseDistributionDataset(
-            data_dir=config['dataset']['data_dir'],
-            input_size=tuple(config['dataset']['input_size']),
-            augment=config['preprocessing']['augment']
-        )
+        # If no pickle file is provided, raise an error
+        raise ValueError(
+            "No data_pkl path provided in config or file does not exist. Please provide a valid path to preprocessed data.")
 
     # Calculate dataset sizes
     dataset_size = len(full_dataset)
@@ -353,73 +365,6 @@ def create_data_loaders(config):
     }
 
 
-def create_data_loaders_from_numpy(config, data_path):
-    """
-    Create data loaders from a single numpy file.
 
-    Args:
-        config (dict): Configuration dictionary
-        data_path (str): Path to numpy file containing the data
-
-    Returns:
-        dict: Dictionary containing DataLoaders for train, val, and test sets
-    """
-    # Load all images from numpy file
-    images = np.load(data_path)
-
-    # Create custom dataset
-    full_dataset = DoseAEDataset(
-        image_list=images,
-        transform=transforms.Compose([
-            Normalize(
-                to_range=(-1, 1) if config['preprocessing'].get('use_tanh_output', True) else (0, 1),
-                percentile=95
-            ),
-            ToTensor()
-        ])
-    )
-
-    # Calculate dataset sizes
-    dataset_size = len(full_dataset)
-    train_size = int(config['dataset']['train_ratio'] * dataset_size)
-    val_size = int(config['dataset']['val_ratio'] * dataset_size)
-    test_size = dataset_size - train_size - val_size
-
-    # Split dataset
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(config['training']['seed'])
-    )
-
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config['hyperparameters']['batch_size'],
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    return {
-        'train': train_loader,
-        'val': val_loader,
-        'test': test_loader
-    }
 
 

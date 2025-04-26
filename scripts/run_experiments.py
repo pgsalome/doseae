@@ -1,26 +1,26 @@
 import os
 import json
+import yaml
 import copy
 import argparse
 import numpy as np
+import pickle
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import pandas as pd
 from datetime import datetime
-import matplotlib.pyplot as plt
 import re
 import glob
 
 # Import Optuna for Bayesian optimization
 import optuna
-from optuna.visualization import plot_optimization_history, plot_param_importances
 from optuna.trial import Trial
 
 # Import wandb for handling runs
 import wandb
 
 # Import from your project
-from utils.optimization import define_model_params, define_training_params, objective
+from utils.optimization import objective
 from scripts.train import train
 
 
@@ -42,7 +42,7 @@ class NumpyEncoder(json.JSONEncoder):
 
 def load_base_config(config_path: str) -> Dict[str, Any]:
     """
-    Load the base configuration file.
+    Load the base configuration file (supports both JSON and YAML).
 
     Args:
         config_path: Path to the base configuration file
@@ -50,8 +50,14 @@ def load_base_config(config_path: str) -> Dict[str, Any]:
     Returns:
         Base configuration dictionary
     """
-    with open(config_path, "r") as f:
-        return json.load(f)
+    if config_path.endswith('.json'):
+        with open(config_path, "r") as f:
+            return json.load(f)
+    elif config_path.endswith('.yaml') or config_path.endswith('.yml'):
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    else:
+        raise ValueError(f"Unsupported config file format: {config_path}")
 
 
 def update_config_with_params(base_config: Dict[str, Any], param_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -179,38 +185,6 @@ def extract_trial_number_from_filename(filename):
     return -1
 
 
-def extract_suggestions_from_config(config_path):
-    """Extract parameter suggestions from a configuration file."""
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-
-    suggestions = {}
-
-    # Extract model parameters
-    suggestions["model.type"] = config.get("model", {}).get("type", "vae")
-    suggestions["model.latent_dim"] = config.get("model", {}).get("latent_dim", 128)
-    suggestions["model.base_filters"] = config.get("model", {}).get("base_filters", 32)
-
-    # Extract hyperparameters
-    suggestions["hyperparameters.learning_rate"] = config.get("hyperparameters", {}).get("learning_rate", 1e-4)
-    suggestions["hyperparameters.batch_size"] = config.get("hyperparameters", {}).get("batch_size", 16)
-    suggestions["hyperparameters.weight_decay"] = config.get("hyperparameters", {}).get("weight_decay", 1e-4)
-
-    # Extract training parameters
-    suggestions["training.optimizer"] = config.get("training", {}).get("optimizer", "adam")
-    suggestions["training.scheduler"] = config.get("training", {}).get("scheduler", "reduce_on_plateau")
-
-    # Extract beta for VAE if applicable
-    if suggestions["model.type"] == "vae":
-        suggestions["hyperparameters.beta"] = config.get("hyperparameters", {}).get("beta", 1.0)
-
-    # Extract preprocessing parameters
-    suggestions["preprocessing.normalize"] = config.get("preprocessing", {}).get("normalize", True)
-    suggestions["preprocessing.use_tanh_output"] = config.get("preprocessing", {}).get("use_tanh_output", True)
-
-    return suggestions
-
-
 def find_completed_trials(output_dir: str) -> tuple:
     """
     Find all completed trials in the output directory.
@@ -267,6 +241,37 @@ def ensure_dir(directory):
     os.makedirs(directory, exist_ok=True)
 
 
+def custom_objective(trial, config, device):
+    """
+    Custom objective function that handles data loading from PKL when available.
+
+    Args:
+        trial: Optuna trial
+        config: Configuration dictionary
+        device: Device to use for training
+
+    Returns:
+        Validation loss
+    """
+    # Handle test mode
+    test_mode = config.get('dataset', {}).get('test_mode', False)
+    n_test_samples = config.get('dataset', {}).get('n_test_samples', 20)
+
+    # If data_pkl is provided in the config, ensure it's set up for use
+    data_pkl_path = config.get('dataset', {}).get('data_pkl')
+    if data_pkl_path and os.path.exists(data_pkl_path):
+        # Set the use_single_file flag to true to use the dataset directly
+        config['dataset']['use_single_file'] = True
+        config['dataset']['data_file'] = data_pkl_path
+
+        # If in test mode, we'll load a subset of the data
+        if test_mode:
+            print(f"Test mode enabled in config: Using up to {n_test_samples} samples")
+
+    # Use the original objective function from utils.optimization
+    return objective(trial, config, device)
+
+
 def run_custom_bayesian_optimization(
         base_config: Dict[str, Any],
         output_dir: str,
@@ -302,7 +307,7 @@ def run_custom_bayesian_optimization(
 
     if resuming:
         print(f"Resuming from trial {start_trial} to {n_trials}.")
-        # Load previous trials to guide the new trials (not strictly necessary)
+        # Load previous trials to guide the new trials
         previous_results = []
         if os.path.exists(results_file):
             try:
@@ -326,7 +331,7 @@ def run_custom_bayesian_optimization(
     # Create a sampler for parameter exploration
     sampler = optuna.samplers.TPESampler(seed=random_state)
 
-    # Create a study object (but we won't use study.optimize directly)
+    # Create a study object
     study = optuna.create_study(direction="minimize", sampler=sampler)
 
     # Initialize tracking variables
@@ -403,8 +408,8 @@ def run_custom_bayesian_optimization(
             json.dump(config, f, indent=2, cls=NumpyEncoder)
 
         try:
-            # Run training
-            val_loss = objective(trial, config, device)
+            # Run training with custom objective that handles data_pkl
+            val_loss = custom_objective(trial, config, device)
 
             # Record the results
             experiment_result = {
@@ -485,19 +490,61 @@ def run_custom_bayesian_optimization(
     # Generate visualization if enough trials completed
     if len(study.trials) > 2:
         try:
-            # Plot optimization history
-            fig = plot_optimization_history(study)
-            fig.update_layout(width=1000, height=600)
-            history_path = os.path.join(output_dir, f"optimization_history_{timestamp}.png")
-            fig.write_image(history_path)
-            print(f"Optimization history plot saved to {history_path}")
+            # Check if wandb is enabled
+            if config.get('wandb', {}).get('use_wandb', False) and wandb.run is not None:
+                # Initialize wandb if it's not already running
+                if wandb.run is None:
+                    wandb.init(
+                        project=config['wandb']['project_name'],
+                        entity=config['wandb']['entity'],
+                        name=f"optimization_summary_{timestamp}",
+                        config=config
+                    )
 
-            # Plot parameter importances
-            fig = plot_param_importances(study)
-            fig.update_layout(width=1000, height=600)
-            importances_path = os.path.join(output_dir, f"param_importances_{timestamp}.png")
-            fig.write_image(importances_path)
-            print(f"Parameter importances plot saved to {importances_path}")
+                # Create optimization history data
+                trial_numbers = [t.number for t in study.trials]
+                values = [t.value if t.value is not None else float('inf') for t in study.trials]
+                best_values = []
+                current_best = float('inf')
+
+                for val in values:
+                    if val < current_best:
+                        current_best = val
+                    best_values.append(current_best)
+
+                # Log optimization history to wandb
+                data = [[x, y, z] for x, y, z in zip(trial_numbers, values, best_values)]
+                table = wandb.Table(data=data, columns=["trial", "value", "best_value"])
+                wandb.log({
+                    "optimization_history": wandb.plot.line(
+                        table, "trial", "value", title="Optimization History"
+                    ),
+                    "best_value_history": wandb.plot.line(
+                        table, "trial", "best_value", title="Best Value History"
+                    )
+                })
+
+                # Log parameter importance
+                try:
+                    param_importances = optuna.importance.get_param_importances(study)
+                    importance_table = wandb.Table(
+                        data=[[param, importance] for param, importance in param_importances.items()],
+                        columns=["parameter", "importance"]
+                    )
+                    wandb.log({
+                        "parameter_importance": wandb.plot.bar(
+                            importance_table, "parameter", "importance", title="Parameter Importance"
+                        )
+                    })
+                except Exception as e:
+                    print(f"Warning: Could not calculate parameter importance: {e}")
+
+                print(f"Optimization visualizations logged to wandb")
+
+                # Finish wandb run
+                wandb.finish()
+            else:
+                print("Wandb not enabled or not initialized, skipping visualization")
 
         except Exception as e:
             print(f"Warning: Could not generate visualization plots: {e}")
@@ -522,7 +569,8 @@ def find_last_completed_trial(output_dir: str) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run Dose Distribution Autoencoder experiments with Bayesian optimization")
-    parser.add_argument("--base_config", default="./config/config.json", type=str, help="Path to base config file")
+    parser.add_argument("--base_config", default="/home/e210/git/doseae/config/config.yaml", type=str,
+                        help="Path to base config file")
     parser.add_argument("--output_dir", type=str, default="./config/bayesian_opt",
                         help="Directory to save experiment configs")
     parser.add_argument("--results_file", type=str, default="./results/bayesian_opt_results.csv",
