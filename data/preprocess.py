@@ -10,15 +10,12 @@ import torch
 import SimpleITK as sitk
 from pathlib import Path
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import random
+import matplotlib.pyplot as plt
 
 # Import your existing functionality
-from data.transforms import NormalizeTo95PercentDose, ZscoreNormalization, ToTensor
-from data.preprocess import normalize_tensor, min_max_normalize
 from utils.patch_extraction import extract_informative_patches_2d, extract_patches_3d
-from utils.utils import ensure_dir
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +35,9 @@ def load_config(config_path):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     return config
+
+
+
 
 
 def resample_volume(volume, original_spacing, target_spacing):
@@ -95,32 +95,180 @@ def load_nrrd_file(file_path):
         return None, None
 
 
-def process_file(file_path, config):
+def min_max_normalize(data):
     """
-    Process a single NRRD dose distribution file.
+    Normalize data to range [0, 1] using min-max normalization.
 
     Args:
-        file_path (str): Path to file
+        data: Input data
+
+    Returns:
+        Normalized data
+    """
+    if isinstance(data, torch.Tensor):
+        data_np = data.cpu().numpy()
+    else:
+        data_np = data
+
+    min_val = np.min(data_np)
+    max_val = np.max(data_np)
+
+    if max_val > min_val:
+        normalized = (data_np - min_val) / (max_val - min_val)
+    else:
+        normalized = data_np
+
+    if isinstance(data, torch.Tensor):
+        return torch.from_numpy(normalized).to(data.device)
+    return normalized
+
+
+def normalize_tensor(data):
+    """
+    Normalize data using Z-score normalization.
+
+    Args:
+        data: Input data
+
+    Returns:
+        Normalized data
+    """
+    if isinstance(data, torch.Tensor):
+        data_np = data.cpu().numpy()
+    else:
+        data_np = data
+
+    mean = np.mean(data_np)
+    std = np.std(data_np)
+
+    if std > 0:
+        normalized = (data_np - mean) / std
+    else:
+        normalized = data_np - mean
+
+    if isinstance(data, torch.Tensor):
+        return torch.from_numpy(normalized).to(data.device)
+    return normalized
+
+
+def process_patient_folder(patient_folder, config):
+    """
+    Process a patient folder containing dose distribution images and masks.
+
+    Args:
+        patient_folder (str): Path to patient folder
+        config (dict): Configuration dictionary
+
+    Returns:
+        list: List of processed data dictionaries
+    """
+    processed_items = []
+
+    # Check for dose image file
+    dose_file = os.path.join(patient_folder, 'image_dd.nrrd')
+    if not os.path.exists(dose_file):
+        logger.warning(f"No dose distribution image found in {patient_folder}")
+        return []
+
+    # Load the dose image
+    dose_data, dose_header = load_nrrd_file(dose_file)
+    if dose_data is None:
+        logger.warning(f"Failed to load dose distribution from {dose_file}")
+        return []
+
+    # Check for non-zero values in dose image
+    if np.count_nonzero(dose_data) == 0:
+        logger.warning(f"Dose distribution in {patient_folder} has no non-zero values")
+        return []
+
+    # Get spacing information
+    if 'spacing' in dose_header:
+        spacing = dose_header['spacing']
+    else:
+        logger.warning(f"No spacing information found in {dose_file}, assuming isotropic 1mm spacing")
+        spacing = (1.0, 1.0, 1.0)
+
+    # Get patient ID
+    patient_id = os.path.basename(patient_folder)
+
+    # Process each mask type - we know we're looking for lungctr and lungipsi
+    for mask_type in ['lungctr', 'lungipsi']:
+        mask_file = os.path.join(patient_folder, f'mask_{mask_type}.nrrd')
+        if not os.path.exists(mask_file):
+            logger.warning(f"No {mask_type} mask found in {patient_folder}")
+            continue
+
+        # Load the mask
+        mask_data, mask_header = load_nrrd_file(mask_file)
+        if mask_data is None:
+            logger.warning(f"Failed to load mask from {mask_file}")
+            continue
+
+        # Check for non-zero values in mask
+        if np.count_nonzero(mask_data) == 0:
+            logger.warning(f"Mask {mask_type} in {patient_folder} has no non-zero values")
+            continue
+
+        # Ensure mask and image are the same shape
+        if mask_data.shape != dose_data.shape:
+            logger.warning(
+                f"Mask shape {mask_data.shape} does not match dose shape {dose_data.shape} for {mask_file}")
+            continue
+
+        # Extract dose data within mask (set everything outside the mask to zero)
+        masked_dose = np.zeros_like(dose_data)
+        masked_dose[mask_data > 0] = dose_data[mask_data > 0]
+
+        # Debug - verify there's data in the masked image
+        if np.count_nonzero(masked_dose) == 0:
+            logger.warning(f"Masked dose for {patient_id}, {mask_type} has no non-zero values")
+
+            # Try to see if there are overlapping non-zero values in both image and mask
+            overlap = np.logical_and(dose_data != 0, mask_data > 0)
+            if np.any(overlap):
+                logger.warning(f"There are overlapping non-zero values, but masking failed")
+            else:
+                logger.warning(f"No overlapping non-zero values between dose and mask")
+            continue
+
+        # Process the masked dose data
+        result = process_masked_data(
+            masked_dose,
+            mask_data,
+            spacing,
+            patient_id,
+            mask_type,
+            dose_file,
+            mask_file,
+            config
+        )
+
+        if result is not None:
+            processed_items.append(result)
+
+    return processed_items
+
+
+def process_masked_data(data, mask, spacing, patient_id, mask_type, dose_path, mask_path, config):
+    """
+    Process masked dose data.
+
+    Args:
+        data (numpy.ndarray): Masked dose data
+        mask (numpy.ndarray): Mask data
+        spacing (tuple): Voxel spacing
+        patient_id (str): Patient ID
+        mask_type (str): Type of mask (ctr or ipsi)
+        dose_path (str): Path to dose image
+        mask_path (str): Path to mask
         config (dict): Configuration dictionary
 
     Returns:
         dict: Processed data or None if processing failed
     """
     try:
-        data, header = load_nrrd_file(file_path)
-        if data is None:
-            return None
-
-        # Get spacing information from header
-        if 'spacing' in header:
-            original_spacing = header['spacing']
-        else:
-            logger.warning(f"No spacing information found in {file_path}, assuming isotropic 1mm spacing")
-            original_spacing = (1.0, 1.0, 1.0)
-
-        # Extract metadata
-        patient_id = Path(file_path).stem.split('_')[0] if '_' in Path(file_path).stem else "unknown"
-        region = os.path.basename(os.path.dirname(file_path))
+        # Save original data for visualization
+        original_data = data.copy()
 
         # Get dimensionality and size settings
         is_2d = len(data.shape) == 2 or config.get('preprocessing', {}).get('extract_slices', False)
@@ -156,147 +304,186 @@ def process_file(file_path, config):
             if is_2d:
                 # If input is 3D but we want 2D, extract middle slice
                 if len(data.shape) == 3:
-                    middle_slice_idx = data.shape[0] // 2
+                    # Find a non-empty slice
+                    non_zero_slices = [i for i in range(data.shape[0]) if np.any(data[i])]
+                    if non_zero_slices:
+                        middle_slice_idx = non_zero_slices[len(non_zero_slices) // 2]
+                    else:
+                        middle_slice_idx = data.shape[0] // 2
+
                     data = data[middle_slice_idx]
+                    mask = mask[middle_slice_idx]
 
                 # Reshape 2D data if needed
                 if data.shape != target_size:
+                    # Create SimpleITK images for both data and mask
+                    sitk_data = sitk.GetImageFromArray(data)
+                    sitk_mask = sitk.GetImageFromArray(mask)
+
+                    # Set spacing
                     if unit_type == 'mm':
-                        # Calculate voxel-based size from physical size
-                        voxel_size = [int(target_size[i] / target_spacing[i]) for i in range(2)]
-                        # Create SimpleITK image and resample
-                        sitk_image = sitk.GetImageFromArray(data)
-                        sitk_image.SetSpacing(target_spacing[:2])
+                        sitk_data.SetSpacing(target_spacing[:2])
+                        sitk_mask.SetSpacing(target_spacing[:2])
 
-                        resampler = sitk.ResampleImageFilter()
-                        resampler.SetInterpolator(sitk.sitkLinear)
-                        resampler.SetSize(voxel_size)
-                        resampler.SetOutputDirection(sitk_image.GetDirection())
-                        resampler.SetOutputOrigin(sitk_image.GetOrigin())
-                        resampler.SetOutputSpacing(target_spacing[:2])
+                    # Create resamplers
+                    resampler_data = sitk.ResampleImageFilter()
+                    resampler_data.SetInterpolator(sitk.sitkLinear)
+                    resampler_data.SetSize(target_size)
+                    resampler_data.SetOutputDirection(sitk_data.GetDirection())
+                    resampler_data.SetOutputOrigin(sitk_data.GetOrigin())
 
-                        resampled_image = resampler.Execute(sitk_image)
-                        data = sitk.GetArrayFromImage(resampled_image)
+                    resampler_mask = sitk.ResampleImageFilter()
+                    resampler_mask.SetInterpolator(sitk.sitkNearestNeighbor)  # Use nearest neighbor for mask
+                    resampler_mask.SetSize(target_size)
+                    resampler_mask.SetOutputDirection(sitk_mask.GetDirection())
+                    resampler_mask.SetOutputOrigin(sitk_mask.GetOrigin())
+
+                    # Calculate new spacing if needed
+                    if unit_type == 'voxels':
+                        new_spacing = [data.shape[i] * spacing[i] / target_size[i] for i in range(2)]
+                        resampler_data.SetOutputSpacing(new_spacing)
+                        resampler_mask.SetOutputSpacing(new_spacing)
                     else:
-                        # Direct voxel-based resize
-                        sitk_image = sitk.GetImageFromArray(data)
+                        resampler_data.SetOutputSpacing(target_spacing[:2])
+                        resampler_mask.SetOutputSpacing(target_spacing[:2])
 
-                        resampler = sitk.ResampleImageFilter()
-                        resampler.SetInterpolator(sitk.sitkLinear)
-                        resampler.SetSize(target_size)
-                        resampler.SetOutputDirection(sitk_image.GetDirection())
-                        resampler.SetOutputOrigin(sitk_image.GetOrigin())
+                    # Resample
+                    resampled_data = resampler_data.Execute(sitk_data)
+                    resampled_mask = resampler_mask.Execute(sitk_mask)
 
-                        # Calculate new spacing
-                        new_spacing = [data.shape[i] * original_spacing[i] / target_size[i] for i in range(2)]
-                        resampler.SetOutputSpacing(new_spacing)
+                    # Convert back to numpy arrays
+                    data = sitk.GetArrayFromImage(resampled_data)
+                    mask = sitk.GetArrayFromImage(resampled_mask)
 
-                        resampled_image = resampler.Execute(sitk_image)
-                        data = sitk.GetArrayFromImage(resampled_image)
+                    # Re-apply mask in case interpolation created values outside the mask
+                    data[mask == 0] = 0
+
             else:  # 3D processing
-                # Ensure data is 3D
-                if len(data.shape) == 2:
-                    # Convert 2D to 3D by adding a dimension
-                    data = data.reshape(1, *data.shape)
-
-                # Resample to target spacing or size
+                # Process 3D data
                 if data.shape != target_size:
+                    # Create SimpleITK images
+                    sitk_data = sitk.GetImageFromArray(data)
+                    sitk_mask = sitk.GetImageFromArray(mask)
+
+                    # Set spacing
                     if unit_type == 'mm':
-                        # Calculate voxel-based size from physical size
-                        voxel_size = [int(target_size[i] / target_spacing[i]) for i in range(3)]
-                        data = resample_volume(data, original_spacing, target_spacing)
+                        sitk_data.SetSpacing(target_spacing)
+                        sitk_mask.SetSpacing(target_spacing)
 
-                        # If the resampled volume doesn't match the target voxel size, resize it
-                        if data.shape != tuple(voxel_size):
-                            sitk_image = sitk.GetImageFromArray(data)
-                            sitk_image.SetSpacing(target_spacing)
+                    # Create resamplers
+                    resampler_data = sitk.ResampleImageFilter()
+                    resampler_data.SetInterpolator(sitk.sitkLinear)
+                    resampler_data.SetSize(target_size[::-1])  # SimpleITK uses XYZ order
+                    resampler_data.SetOutputDirection(sitk_data.GetDirection())
+                    resampler_data.SetOutputOrigin(sitk_data.GetOrigin())
 
-                            resampler = sitk.ResampleImageFilter()
-                            resampler.SetInterpolator(sitk.sitkLinear)
-                            resampler.SetSize(voxel_size)
-                            resampler.SetOutputDirection(sitk_image.GetDirection())
-                            resampler.SetOutputOrigin(sitk_image.GetOrigin())
-                            resampler.SetOutputSpacing(target_spacing)
+                    resampler_mask = sitk.ResampleImageFilter()
+                    resampler_mask.SetInterpolator(sitk.sitkNearestNeighbor)  # Use nearest neighbor for mask
+                    resampler_mask.SetSize(target_size[::-1])  # SimpleITK uses XYZ order
+                    resampler_mask.SetOutputDirection(sitk_mask.GetDirection())
+                    resampler_mask.SetOutputOrigin(sitk_mask.GetOrigin())
 
-                            resampled_image = resampler.Execute(sitk_image)
-                            data = sitk.GetArrayFromImage(resampled_image)
+                    # Calculate new spacing if needed
+                    if unit_type == 'voxels':
+                        new_spacing = [data.shape[i] * spacing[i] / target_size[i] for i in range(3)]
+                        resampler_data.SetOutputSpacing(new_spacing)
+                        resampler_mask.SetOutputSpacing(new_spacing)
                     else:
-                        # Direct voxel-based resize
-                        sitk_image = sitk.GetImageFromArray(data)
+                        resampler_data.SetOutputSpacing(target_spacing)
+                        resampler_mask.SetOutputSpacing(target_spacing)
 
-                        resampler = sitk.ResampleImageFilter()
-                        resampler.SetInterpolator(sitk.sitkLinear)
-                        resampler.SetSize(target_size[::-1])  # SimpleITK uses XYZ order
-                        resampler.SetOutputDirection(sitk_image.GetDirection())
-                        resampler.SetOutputOrigin(sitk_image.GetOrigin())
+                    # Resample
+                    resampled_data = resampler_data.Execute(sitk_data)
+                    resampled_mask = resampler_mask.Execute(sitk_mask)
 
-                        # Calculate new spacing
-                        new_spacing = [data.shape[i] * original_spacing[i] / target_size[i] for i in range(3)]
-                        resampler.SetOutputSpacing(new_spacing)
+                    # Convert back to numpy arrays
+                    data = sitk.GetArrayFromImage(resampled_data)
+                    mask = sitk.GetArrayFromImage(resampled_mask)
 
-                        resampled_image = resampler.Execute(sitk_image)
-                        data = sitk.GetArrayFromImage(resampled_image)
+                    # Re-apply mask in case interpolation created values outside the mask
+                    data[mask == 0] = 0
 
             # Use the target spacing for the processed data if using mm
             if unit_type == 'mm':
                 spacing_to_use = target_spacing
             else:
                 # If using voxels, update the spacing to reflect the new voxel sizes
-                spacing_to_use = original_spacing
+                if is_2d:
+                    spacing_to_use = [data.shape[i] * spacing[i] / target_size[i] for i in range(2)]
+                else:
+                    spacing_to_use = [data.shape[i] * spacing[i] / target_size[i] for i in range(3)]
         else:
             # If not resizing, keep original spacing
-            spacing_to_use = original_spacing
+            spacing_to_use = spacing
+
+        # Check if there's still data after resizing
+        if np.count_nonzero(data) == 0:
+            logger.warning(f"No non-zero values in resized data for {patient_id}, mask {mask_type}")
+            return None
 
         # Normalize if requested
         if config.get('preprocessing', {}).get('normalize', False):
-            # Check if prescription dose is provided
-            prescription_dose = None
-            if 'prescription_dose' in config.get('preprocessing', {}):
-                prescription_doses = config['preprocessing']['prescription_dose']
-                if isinstance(prescription_doses, (int, float)):
-                    # Single dose for all data
-                    prescription_dose = prescription_doses
-                elif isinstance(prescription_doses, dict) and patient_id in prescription_doses:
-                    # Patient-specific doses from dictionary
-                    prescription_dose = prescription_doses[patient_id]
-
+            # Store normalization method
             normalize_method = config.get('preprocessing', {}).get('normalize_method', '95percentile')
 
-            if normalize_method == "95percentile":
-                percentile_val = np.percentile(data, config.get('preprocessing', {}).get('percentile_norm', 95))
-                if percentile_val > 0:
-                    data = data / percentile_val
-                    # If prescription dose is provided, rescale to make 100% = prescription dose
-                    if prescription_dose is not None:
-                        data = data * prescription_dose / 100.0
-            elif normalize_method == "prescription" and prescription_dose is not None:
-                # Normalize directly to prescription dose
-                max_val = np.max(data)
-                if max_val > 0:
-                    data = data * prescription_dose / max_val
-            elif normalize_method == "minmax":
-                data = min_max_normalize(torch.from_numpy(data)).numpy()
-            elif normalize_method == "zscore":
-                data = normalize_tensor(torch.from_numpy(data)).numpy()
+            # Only consider non-zero values (where mask is applied)
+            non_zero_indices = mask > 0
+            non_zero_data = data[non_zero_indices]
 
-        # Calculate zero count
-        zc_value = np.count_nonzero(data)
+            if len(non_zero_data) == 0:
+                logger.warning(f"No non-zero values in masked data for {patient_id}, mask {mask_type}")
+                return None
+
+            # Log value ranges before normalization for debugging
+            logger.info(
+                f"Patient {patient_id}, Mask {mask_type} - Value range before normalization: {np.min(data):.4f} to {np.max(data):.4f}")
+
+            if normalize_method == "95percentile":
+                percentile_val = np.percentile(non_zero_data,
+                                               config.get('preprocessing', {}).get('percentile_norm', 95))
+                if percentile_val > 0:
+                    # Normalize only non-zero values
+                    data[non_zero_indices] = data[non_zero_indices] / percentile_val
+            elif normalize_method == "minmax":
+                min_val = np.min(non_zero_data)
+                max_val = np.max(non_zero_data)
+                if max_val > min_val:
+                    # Normalize only non-zero values
+                    data[non_zero_indices] = (data[non_zero_indices] - min_val) / (max_val - min_val)
+            elif normalize_method == "zscore":
+                mean = np.mean(non_zero_data)
+                std = np.std(non_zero_data)
+                if std > 0:
+                    # Normalize only non-zero values
+                    data[non_zero_indices] = (data[non_zero_indices] - mean) / std
+
+            # Log value ranges after normalization for debugging
+            logger.info(
+                f"Patient {patient_id}, Mask {mask_type} - Value range after normalization: {np.min(data):.4f} to {np.max(data):.4f}")
+        else:
+            normalize_method = "none"
+
+        # Calculate zero count (non-zero voxels in the mask)
+        zc_value = np.count_nonzero(mask)
 
         return {
             "data": data,
-            "metadata": header,
+            "mask": mask,
+            "original_data": original_data,
             "patient_id": patient_id,
-            "region": region,
+            "mask_type": mask_type,
             "zc_value": zc_value,
             "is_2d": len(data.shape) == 2,
-            "file_path": file_path,
+            "dose_path": dose_path,
+            "mask_path": mask_path,
             "spacing": spacing_to_use,
-            "prescription_dose": prescription_dose if 'prescription_dose' in locals() else None,
-            "was_resized": should_resize
+            "original_shape": data.shape,
+            "was_resized": should_resize,
+            "normalize_method": normalize_method
         }
 
     except Exception as e:
-        logger.error(f"Error processing {file_path}: {e}")
+        logger.error(f"Error processing masked data for {patient_id}, mask {mask_type}: {e}")
         return None
 
 
@@ -312,6 +499,7 @@ def extract_patches_from_data(volume_data, config):
         list: List of patch dictionaries
     """
     data = volume_data["data"]
+    mask = volume_data["mask"]
     patches = []
 
     # Get patch extraction settings
@@ -353,20 +541,49 @@ def extract_patches_from_data(volume_data, config):
                 threshold=config.get('patch_extraction', {}).get('threshold', 0.01)
             )
 
+            # Create corresponding mask patches
+            mask_patches = []
             for patch in patches_arr:
+                # Find the location of this patch in the original data
+                for i in range(0, data.shape[0] - voxel_patch_size[0] + 1, voxel_patch_size[0]):
+                    for j in range(0, data.shape[1] - voxel_patch_size[1] + 1, voxel_patch_size[1]):
+                        if np.array_equal(data[i:i + voxel_patch_size[0], j:j + voxel_patch_size[1]], patch):
+                            mask_patch = mask[i:i + voxel_patch_size[0], j:j + voxel_patch_size[1]]
+                            mask_patches.append(mask_patch)
+                            break
+                    else:
+                        continue
+                    break
+
+            # Check if we found mask patches for all data patches
+            if len(mask_patches) != len(patches_arr):
+                logger.warning(
+                    f"Could not find mask patches for all data patches: {len(mask_patches)} vs {len(patches_arr)}")
+                # Create empty mask patches for missing ones
+                while len(mask_patches) < len(patches_arr):
+                    mask_patches.append(np.zeros_like(patches_arr[len(mask_patches)]))
+
+            # Create patch dictionaries
+            for i, (patch, mask_patch) in enumerate(zip(patches_arr, mask_patches)):
                 patch_dict = {
                     "data": patch,
+                    "mask": mask_patch,
                     "patient_id": volume_data["patient_id"],
-                    "region": volume_data["region"],
+                    "mask_type": volume_data["mask_type"],
                     "zc_value": np.count_nonzero(patch),
                     "is_2d": True,
-                    "original_file": volume_data["file_path"]
+                    "original_data": patch.copy(),  # Store original patch
+                    "normalize_method": volume_data.get("normalize_method", "none"),
+                    "was_resized": volume_data.get("was_resized", False),
+                    "dose_path": volume_data["dose_path"],
+                    "mask_path": volume_data["mask_path"]
                 }
                 patches.append(patch_dict)
         else:
             # Extract 2D patches from 3D data (slice first)
             for i in range(data.shape[0]):
                 slice_data = data[i]
+                slice_mask = mask[i]
 
                 if patch_unit_type == 'mm' and spacing:
                     # Convert physical size to voxel size
@@ -383,15 +600,39 @@ def extract_patches_from_data(volume_data, config):
                     threshold=config.get('patch_extraction', {}).get('threshold', 0.01)
                 )
 
+                # Create corresponding mask patches using same approach as above
+                mask_patches = []
                 for patch in slice_patches:
+                    found = False
+                    for i_patch in range(0, slice_data.shape[0] - voxel_patch_size[0] + 1, voxel_patch_size[0]):
+                        for j_patch in range(0, slice_data.shape[1] - voxel_patch_size[1] + 1, voxel_patch_size[1]):
+                            if np.array_equal(slice_data[i_patch:i_patch + voxel_patch_size[0],
+                                              j_patch:j_patch + voxel_patch_size[1]], patch):
+                                mask_patch = slice_mask[i_patch:i_patch + voxel_patch_size[0],
+                                             j_patch:j_patch + voxel_patch_size[1]]
+                                mask_patches.append(mask_patch)
+                                found = True
+                                break
+                        if found:
+                            break
+                    if not found:
+                        mask_patches.append(np.zeros_like(patch))
+
+                # Create patch dictionaries
+                for j, (patch, mask_patch) in enumerate(zip(slice_patches, mask_patches)):
                     patch_dict = {
                         "data": patch,
+                        "mask": mask_patch,
                         "patient_id": volume_data["patient_id"],
-                        "region": volume_data["region"],
+                        "mask_type": volume_data["mask_type"],
                         "zc_value": np.count_nonzero(patch),
                         "is_2d": True,
+                        "original_data": patch.copy(),  # Store original patch
+                        "normalize_method": volume_data.get("normalize_method", "none"),
+                        "was_resized": volume_data.get("was_resized", False),
                         "slice_idx": i,
-                        "original_file": volume_data["file_path"]
+                        "dose_path": volume_data["dose_path"],
+                        "mask_path": volume_data["mask_path"]
                     }
                     patches.append(patch_dict)
     else:  # 3D patches
@@ -418,18 +659,27 @@ def extract_patches_from_data(volume_data, config):
                 random_state=config.get('patch_extraction', {}).get('random_state', 42)
             )
 
+            # For 3D, we'll just use a mask of ones since extraction_patches_3d doesn't give us patch locations
             for patch in patches_arr:
+                # Create a mask of ones (assuming the patch is already masked)
+                mask_patch = np.ones_like(patch)
+
                 patch_dict = {
                     "data": patch,
+                    "mask": mask_patch,
                     "patient_id": volume_data["patient_id"],
-                    "region": volume_data["region"],
+                    "mask_type": volume_data["mask_type"],
                     "zc_value": np.count_nonzero(patch),
                     "is_2d": False,
-                    "original_file": volume_data["file_path"]
+                    "original_data": patch.copy(),  # Store original patch
+                    "normalize_method": volume_data.get("normalize_method", "none"),
+                    "was_resized": volume_data.get("was_resized", False),
+                    "dose_path": volume_data["dose_path"],
+                    "mask_path": volume_data["mask_path"]
                 }
                 patches.append(patch_dict)
         else:
-            logger.warning(f"Cannot extract 3D patches from 2D data: {volume_data['file_path']}")
+            logger.warning(f"Cannot extract 3D patches from 2D data for {volume_data['patient_id']}")
 
     return patches
 
@@ -446,6 +696,8 @@ def extract_slices(volume_data, config):
         list: List of slice data dictionaries
     """
     data = volume_data["data"]
+    mask = volume_data["mask"]
+    original_data = volume_data.get("original_data", data)
 
     # If already 2D, return as is
     if volume_data["is_2d"]:
@@ -458,104 +710,284 @@ def extract_slices(volume_data, config):
     if slice_extraction == "all":
         for i in range(data.shape[0]):
             slice_data = data[i]
-            if np.any(slice_data):  # Skip empty slices
+            slice_mask = mask[i]
+            slice_original = original_data[i] if original_data is not None else slice_data
+
+            # Only include slices that have mask content
+            if np.any(slice_mask):
                 slice_dict = {
                     "data": slice_data,
+                    "mask": slice_mask,
+                    "original_data": slice_original,
                     "patient_id": volume_data["patient_id"],
-                    "region": volume_data["region"],
-                    "zc_value": np.count_nonzero(slice_data),
+                    "mask_type": volume_data["mask_type"],
+                    "zc_value": np.count_nonzero(slice_mask),
                     "is_2d": True,
                     "slice_idx": i,
-                    "original_file": volume_data["file_path"]
+                    "normalize_method": volume_data.get("normalize_method", "none"),
+                    "was_resized": volume_data.get("was_resized", False),
+                    "dose_path": volume_data["dose_path"],
+                    "mask_path": volume_data["mask_path"]
                 }
                 slices.append(slice_dict)
     elif slice_extraction == "center":
-        i = data.shape[0] // 2
-        slice_data = data[i]
-        if np.any(slice_data):
+        # Find center slice that has mask content
+        non_zero_slices = [i for i in range(mask.shape[0]) if np.any(mask[i])]
+        if non_zero_slices:
+            i = non_zero_slices[len(non_zero_slices) // 2]
+            slice_data = data[i]
+            slice_mask = mask[i]
+            slice_original = original_data[i] if original_data is not None else slice_data
+
             slice_dict = {
                 "data": slice_data,
+                "mask": slice_mask,
+                "original_data": slice_original,
                 "patient_id": volume_data["patient_id"],
-                "region": volume_data["region"],
-                "zc_value": np.count_nonzero(slice_data),
+                "mask_type": volume_data["mask_type"],
+                "zc_value": np.count_nonzero(slice_mask),
                 "is_2d": True,
                 "slice_idx": i,
-                "original_file": volume_data["file_path"]
+                "normalize_method": volume_data.get("normalize_method", "none"),
+                "was_resized": volume_data.get("was_resized", False),
+                "dose_path": volume_data["dose_path"],
+                "mask_path": volume_data["mask_path"]
             }
             slices.append(slice_dict)
     elif slice_extraction == "informative":
         threshold = config.get('preprocessing', {}).get('non_zero_threshold', 0.05)
         for i in range(data.shape[0]):
-            slice_data = data[i]
-            if np.count_nonzero(slice_data) / slice_data.size > threshold:
+            slice_mask = mask[i]
+            if np.count_nonzero(slice_mask) / slice_mask.size > threshold:
+                slice_data = data[i]
+                slice_original = original_data[i] if original_data is not None else slice_data
+
                 slice_dict = {
                     "data": slice_data,
+                    "mask": slice_mask,
+                    "original_data": slice_original,
                     "patient_id": volume_data["patient_id"],
-                    "region": volume_data["region"],
-                    "zc_value": np.count_nonzero(slice_data),
+                    "mask_type": volume_data["mask_type"],
+                    "zc_value": np.count_nonzero(slice_mask),
                     "is_2d": True,
                     "slice_idx": i,
-                    "original_file": volume_data["file_path"]
+                    "normalize_method": volume_data.get("normalize_method", "none"),
+                    "was_resized": volume_data.get("was_resized", False),
+                    "dose_path": volume_data["dose_path"],
+                    "mask_path": volume_data["mask_path"]
                 }
                 slices.append(slice_dict)
 
     return slices
 
 
+def visualize_samples(dataset, output_dir, num_samples=2):
+    """
+    Visualize sample images from the dataset showing original image and normalized.
+    (No middle image as requested)
+
+    Args:
+        dataset (list): List of processed data items
+        output_dir (Path): Output directory
+        num_samples (int): Number of samples to visualize
+    """
+    if not dataset:
+        logger.warning("No samples to visualize")
+        return
+
+    # Create visualization directory
+    viz_dir = output_dir / "visualizations"
+    viz_dir.mkdir(exist_ok=True, parents=True)
+
+    # Select random samples
+    if len(dataset) > num_samples:
+        sample_indices = random.sample(range(len(dataset)), num_samples)
+        samples = [dataset[i] for i in sample_indices]
+    else:
+        samples = dataset[:min(num_samples, len(dataset))]
+
+    for i, sample in enumerate(samples):
+        data = sample["data"]  # Processed data
+        original_data = sample.get("original_data", data)  # Original data
+        mask = sample.get("mask", np.ones_like(data))  # Mask data
+        patient_id = sample["patient_id"]
+        mask_type = sample.get("mask_type", "unknown")
+        normalize_method = sample.get("normalize_method", "unknown")
+
+        # Find middle slice with content for 3D data
+        if len(data.shape) == 3:
+            non_zero_indices = []
+            for idx in range(data.shape[0]):
+                if np.any(data[idx]):
+                    non_zero_indices.append(idx)
+
+            if non_zero_indices:
+                # Take the middle of non-zero slices
+                slice_idx = non_zero_indices[len(non_zero_indices) // 2]
+            else:
+                # If no non-zero slices, just take the middle slice
+                slice_idx = data.shape[0] // 2
+
+            # Extract slices
+            data_slice = data[slice_idx]
+            mask_slice = mask[slice_idx]
+            original_slice = original_data[slice_idx] if original_data is not None else data_slice
+            slice_info = f" (Slice {slice_idx})"
+        else:
+            # 2D data
+            data_slice = data
+            mask_slice = mask
+            original_slice = original_data
+            slice_info = ""
+
+        # Create figure with images (2 rows: original and normalized)
+        plt.figure(figsize=(10, 10))
+
+        # Row 1: Original image
+        plt.subplot(2, 1, 1)
+        plt.imshow(original_slice, cmap='viridis')  # Changed to viridis for dose visualization
+        plt.colorbar(fraction=0.046, pad=0.04)
+        plt.title(f"Original Dose Distribution - Patient {patient_id}{slice_info}")
+        plt.axis("off")
+
+        # Row 2: Normalized image
+        plt.subplot(2, 1, 2)
+        plt.imshow(data_slice, cmap='viridis')  # Changed to viridis for dose visualization
+        plt.colorbar(fraction=0.046, pad=0.04)
+        plt.title(f"Normalized Dose ({normalize_method}) - {mask_type} mask")
+        plt.axis("off")
+
+        plt.tight_layout()
+        plt.savefig(viz_dir / f"sample_{i + 1}_patient_{patient_id}.png", dpi=300)
+        plt.close()
+
+        # Create separate histogram figure
+        plt.figure(figsize=(10, 5))
+
+        # Only include non-zero values in the histograms
+        # For original data, don't mask it
+        orig_values = original_slice.flatten()
+        orig_values = orig_values[orig_values != 0]  # Filter zeros
+
+        # For normalized, only look in the mask area
+        norm_values = data_slice.flatten()
+        norm_values = norm_values[norm_values != 0]  # Filter zeros
+
+        # Plot histograms - check if there's any data first
+        plt.subplot(1, 2, 1)
+        if len(orig_values) > 0:
+            plt.hist(orig_values, bins=50, alpha=0.7)
+            plt.title(f"Original Dose Distribution\nPatient: {patient_id}")
+            plt.xlabel("Dose Values")
+            plt.ylabel("Frequency")
+        else:
+            plt.text(0.5, 0.5, "No non-zero values",
+                     horizontalalignment='center', verticalalignment='center')
+            plt.title("Original Dose Histogram (Empty)")
+
+        plt.subplot(1, 2, 2)
+        if len(norm_values) > 0:
+            plt.hist(norm_values, bins=50, alpha=0.7)
+            plt.title(f"Normalized ({normalize_method}) Histogram")
+            plt.xlabel("Normalized Dose Values")
+            plt.ylabel("Frequency")
+        else:
+            plt.text(0.5, 0.5, "No non-zero values",
+                     horizontalalignment='center', verticalalignment='center')
+            plt.title("Normalized Histogram (Empty)")
+
+        plt.suptitle(f"Dose Distribution Histogram for Patient {patient_id}", fontsize=16)
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.savefig(viz_dir / f"histogram_{i + 1}_patient_{patient_id}.png", dpi=300)
+        plt.close()
+
+        # Also save a visualization of the mask itself
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask_slice, cmap='binary')
+        plt.colorbar()
+        plt.title(f"Mask ({mask_type}) - Patient {patient_id}{slice_info}")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(viz_dir / f"mask_{i + 1}_patient_{patient_id}.png", dpi=300)
+        plt.close()
+
+    logger.info(f"Sample visualizations saved to {viz_dir}")
+
+
 def create_dataset(config):
     """
-    Create dataset from dose distribution files.
+    Create dataset from patient folders containing dose distribution images and masks.
 
     Args:
         config (dict): Configuration dictionary
     """
     # Get directories from config
     data_dir = Path(config['dataset']['data_dir'])
-    output_dir = Path(config['output']['results_dir']) / "datasets"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get list of NRRD files
-    file_list = list(data_dir.glob("**/*.nrrd"))
-
-    if not file_list:
-        logger.error(f"No NRRD files found in {data_dir}")
+    # Debug - check if the directory exists
+    if not data_dir.exists():
+        logger.error(f"Data directory does not exist: {data_dir}")
         return
 
+    logger.info(f"Data directory: {data_dir}")
+
+    # Debug the first few patient folders
+    patient_folders = [f for f in data_dir.glob("*") if f.is_dir()]
+    if not patient_folders:
+        logger.error(f"No patient folders found in {data_dir}")
+        return
+
+    logger.info(f"Found {len(patient_folders)} patient folders")
+
+    # Debug first patient
+    if patient_folders:
+        first_patient = patient_folders[0]
+        logger.info(f"Examining first patient folder: {first_patient}")
+
+        # Check mask files
+        for mask_type in ['lungctr', 'lungipsi']:
+            mask_file = first_patient / f"mask_{mask_type}.nrrd"
+
+    # Use output_dir from dataset if specified, otherwise use default
+    if 'output_dir' in config['dataset']:
+        output_dir = Path(config['dataset']['output_dir'])
+    else:
+        output_dir = Path(config['output']['results_dir']) / "datasets"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Check if we're in test mode
-    test_mode = config.get('preprocessing', {}).get('test_mode', False)
+    test_mode = config.get('dataset', {}).get('test_mode', False) or config.get('preprocessing', {}).get('test_mode',
+                                                                                                         False)
     if test_mode:
-        n_test_samples = config.get('preprocessing', {}).get('n_test_samples', 20)
-        if len(file_list) > n_test_samples:
-            # Randomly select n_test_samples files
+        n_test_samples = config.get('dataset', {}).get('n_test_samples', 20) or config.get('preprocessing', {}).get(
+            'n_test_samples', 20)
+        if len(patient_folders) > n_test_samples:
+            # Randomly select n_test_samples folders
             random.seed(config.get('training', {}).get('seed', 42))
-            file_list = random.sample(file_list, n_test_samples)
-            logger.info(f"Test mode enabled: Selected {n_test_samples} files randomly")
+            patient_folders = random.sample(patient_folders, n_test_samples)
+            logger.info(f"Test mode enabled: Selected {n_test_samples} patients randomly")
 
             # Update the output directory to indicate test mode
             output_dir = output_dir / f"test_{n_test_samples}"
             output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Processing {len(file_list)} NRRD files")
+    logger.info(f"Processing {len(patient_folders)} patient folders")
 
-    # Process files in parallel
-    num_workers = config.get('preprocessing', {}).get('num_workers', 8)
+    # Process patient folders
     processed_data = []
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        future_to_file = {executor.submit(process_file, str(file_path), config): file_path for file_path in file_list}
-        for future in tqdm(as_completed(future_to_file), total=len(file_list), desc="Processing files"):
-            file_path = future_to_file[future]
-            try:
-                result = future.result()
-                if result is not None:
-                    processed_data.append(result)
-            except Exception as e:
-                logger.error(f"Error processing {file_path}: {e}")
+    for folder in tqdm(patient_folders, desc="Processing patients"):
+        items = process_patient_folder(str(folder), config)
+        processed_data.extend(items)
 
     if not processed_data:
-        logger.error("No files were successfully processed")
+        logger.error("No data was successfully processed")
         return
 
-    logger.info(f"Successfully processed {len(processed_data)} files")
+    logger.info(f"Successfully processed {len(processed_data)} masked regions")
+
+    # Visualize sample cases
+    visualize_samples(processed_data, output_dir, num_samples=2)
 
     # Check if we need to extract patches or slices
     if config.get('patch_extraction', {}).get('enable', False):
@@ -603,8 +1035,8 @@ def create_dataset(config):
     metadata = {
         "num_samples": len(output_data),
         "format": output_format,
-        "regions": sorted(list(set(item["region"] for item in output_data))),
         "patients": sorted(list(set(item["patient_id"] for item in output_data))),
+        "mask_types": sorted(list(set(item.get("mask_type", "unknown") for item in output_data))),
         "is_2d": all(item["is_2d"] for item in output_data),
         "data_shape": output_data[0]["data"].shape if output_data else None,
         "mean_zc_value": float(np.mean([item["zc_value"] for item in output_data])),
@@ -634,6 +1066,7 @@ def create_dataset(config):
     logger.info(f"Dataset created successfully in {output_dir}")
     logger.info(f"Final dataset shape: {metadata['data_shape']}")
     logger.info(f"Total samples: {metadata['num_samples']}")
+    logger.info(f"Visualizations saved in {output_dir}/visualizations")
 
     # Return the path to the dataset
     return str(dataset_path)
@@ -641,7 +1074,8 @@ def create_dataset(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create dose distribution dataset")
-    parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
+    parser.add_argument("--config", type=str, default="/home/e210/git/doseae/config/config.yaml",
+                        help="Path to configuration file")
     args = parser.parse_args()
 
     # Load configuration

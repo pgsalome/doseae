@@ -1,5 +1,5 @@
 dataset:
-  data_dir: '/path/to/dose_distribution/data'
+  data_dir: '/media/e210/HD81/Adhvaith_datasets/nsclc_public'
   data_pkl: null  # Will be updated automatically after preprocessing
   train_ratio: 0.8
   val_ratio: 0.1
@@ -10,27 +10,32 @@ dataset:
   patch_size_3d: [16, 64, 64]  # Size of patches for 3D data
   use_single_file: false  # Set to true to train on a single .npy file
   data_file: null  # Path to single .npy file if use_single_file is true
+  test_mode: true  # Can be set at top level or here for backward compatibility
+  n_test_samples: 20  # Can be set at top level or here for backward compatibility
 
-preprocessing:
+# Settings for initial data preparation (before training)
+preprocessing:  # Keep this as 'preprocessing' for compatibility
   normalize: true
   normalize_method: "95percentile"  # "95percentile", "minmax", "zscore", or "prescription"
   percentile_norm: 95  # Percentile for normalization (0-100)
-  prescription_dose: 45  # Prescription dose in Gy (or dictionary mapping patient IDs to doses)
-  use_tanh_output: true  # Use tanh instead of sigmoid for output normalization
   voxel_spacing: [2, 2, 2]  # Physical spacing in mm (isotropic or anisotropic)
-  resize_to: null  # Target size for resampling, null to keep original size
+  resize_to: [128, 128, 64]  # Target size for resampling, null to keep original size
   unit_type: "voxels"  # "voxels" or "mm" - how size values are interpreted
   extract_slices: false  # Whether to extract 2D slices from 3D volumes
   slice_extraction: "informative"  # "all", "center", or "informative"
   non_zero_threshold: 0.05  # For informative slice extraction
   num_workers: 8  # Number of parallel workers
   batch_size: 1000  # Batch size for saving
+  use_tanh_output: true  # Keep this here for compatibility
 
-  # Data augmentation settings (used during training)
-  augment: true
-  rotate: true
-  flip: true
-  adjust_brightness: true
+# Settings for transforms during training (conceptually separate but not used by preprocessing script)
+transforms:
+  augment: true  # Whether to apply data augmentation during training
+  rotate: true  # Random rotation
+  flip: true  # Random flipping
+  adjust_brightness: true  # Random brightness adjustment
+  random_crop: false  # Random cropping during training
+  random_noise: false  # Add random noise during training
 
 patch_extraction:
   enable: false  # Set to true to extract patches
@@ -41,7 +46,6 @@ patch_extraction:
   max_patches_per_slice: 100  # Maximum number of patches to extract per slice
   max_patches_per_volume: 500  # Maximum number of patches to extract per volume
   random_state: 42  # Random seed for patch extraction
-  output_dir: './patches'  # Directory to save extracted patches
 
 model:
   type: 'vae'  # Options: 'vae', 'resnet_ae', 'unet_ae', 'conv_autoencoder', 'mlp_autoencoder', 'unet'
@@ -85,6 +89,6 @@ optuna:
   pruner: 'median'  # Options: 'median', 'none'
 
 output:
-  model_dir: './models'
-  log_dir: './logs'
-  results_dir: './results'
+  model_dir: '/media/e210/HD81/Adhvaith_datasets/results/models'
+  log_dir: '/media/e210/HD81/Adhvaith_datasets/results/logs'
+  results_dir: '/media/e210/HD81/Adhvaith_datasets/results'
