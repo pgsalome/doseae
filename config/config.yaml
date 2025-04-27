@@ -1,6 +1,6 @@
 dataset:
   data_dir: '/media/e210/HD81/Adhvaith_datasets/nsclc_public'
-  data_pkl: '/media/e210/HD81/Adhvaith_datasets/results/datasets/test_20/volumes_dataset.pkl'
+  data_pkl: '/media/e210/HD81/Adhvaith_datasets/results/datasets/volumes_dataset.pkl'
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -10,7 +10,7 @@ dataset:
   patch_size_3d: [50, 50, 50]  # Size of patches for 3D data
   use_single_file: false  # Set to true to train on a single .npy file
   data_file: null  # Path to single .npy file if use_single_file is true
-  test_mode: true  # Can be set at top level or here for backward compatibility
+  test_mode: false  # Can be set at top level or here for backward compatibility
   n_test_samples: 20  # Can be set at top level or here for backward compatibility
 
 # Settings for initial data preparation (before training)
@@ -18,8 +18,8 @@ preprocessing:  # Keep this as 'preprocessing' for compatibility
   normalize: true
   normalize_method: "95percentile"  # "95percentile", "minmax", "zscore", or "prescription"
   percentile_norm: 95  # Percentile for normalization (0-100)
-  voxel_spacing: [2, 2, 2]  # Physical spacing in mm (isotropic or anisotropic)
-  resize_to: [64, 64, 64]  # Target size for resampling, null to keep original size
+  voxel_spacing: [1, 1, 1]  # Physical spacing in mm (isotropic or anisotropic)
+  resize_to: [256, 256, 256]  # Target size for resampling, null to keep original size
   unit_type: "voxels"  # "voxels" or "mm" - how size values are interpreted
   extract_slices: false  # Whether to extract 2D slices from 3D volumes
   slice_extraction: "informative"  # "all", "center", or "informative"
@@ -38,10 +38,10 @@ transforms:
   random_noise: false  # Add random noise during training
 
 patch_extraction:
-  enable: false  # Set to true to extract patches
+  enable: true  # Set to true to extract patches
   patch_dimension: "3D"  # "2D" or "3D" - dimensionality of patches to extract
   patch_size: [50, 50, 50]  # Size of patches to extract (in voxels or mm)
-  patch_unit_type: "voxels"  # "voxels" or "mm" - how patch_size values are interpreted
+  patch_unit_type: "mm"  # "voxels" or "mm" - how patch_size values are interpreted
   threshold: 0.01  # Standard deviation threshold for informative patches
   max_patches_per_slice: 100  # Maximum number of patches to extract per slice
   max_patches_per_volume: 500  # Maximum number of patches to extract per volume
@@ -89,6 +89,6 @@ optuna:
   pruner: 'median'  # Options: 'median', 'none'
 
 output:
-  model_dir: '/media/e210/HD81/Adhvaith_datasets/results/models'
-  log_dir: '/media/e210/HD81/Adhvaith_datasets/results/logs'
-  results_dir: '/media/e210/HD81/Adhvaith_datasets/results'
+  model_dir: '/media/e210/HD81/Adhvaith_datasets/results_patch/models'
+  log_dir: '/media/e210/HD81/Adhvaith_datasets/results_patch/logs'
+  results_dir: '/media/e210/HD81/Adhvaith_datasets/results_patch'

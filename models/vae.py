@@ -54,7 +54,7 @@ class VAE(BaseAutoencoder):
         # Decoder input
         self.fc_decoder = nn.Linear(latent_dim, self.flatten_size)
 
-        # Decoder
+        # Decoder with precise output_padding to match input size
         self.decoder = nn.Sequential(
             nn.Unflatten(1, (base_filters * 8, self.encoded_size[0], self.encoded_size[1], self.encoded_size[2])),
             # [batch, base_filters*8, D/16, H/16, W/16]
@@ -140,7 +140,6 @@ class VAE(BaseAutoencoder):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         recon_x = self.decode(z)
-
         return recon_x, mu, logvar
 
     def get_losses(self, x, x_recon, mu, logvar, beta=1.0):
@@ -157,12 +156,6 @@ class VAE(BaseAutoencoder):
         Returns:
             dict: Dictionary of loss components
         """
-        # Check for size mismatch and resize if necessary
-        if x.shape != x_recon.shape:
-            print(f"Input shape {x.shape} and reconstructed shape {x_recon.shape} don't match. Resizing...")
-            import torch.nn.functional as F
-            x_recon = F.interpolate(x_recon, size=x.shape[2:], mode='trilinear', align_corners=False)
-
         # Reconstruction loss (MSE)
         recon_loss = F.mse_loss(x_recon, x, reduction='mean')
 

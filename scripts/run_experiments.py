@@ -271,9 +271,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run optimization experiments")
     parser.add_argument("--base_config", default="config/config.yaml", type=str, help="Path to base config file")
     parser.add_argument("--output_dir", type=str, default="./config/bayesian_opt", help="Directory to save configs")
-    parser.add_argument("--results_file", type=str, default="./results/bayesian_opt_results.csv",
+    parser.add_argument("--results_file", type=str, default="./results/bayesian_opt_results_image.csv",
                         help="Path to save results")
-    parser.add_argument("--n_trials", type=int, default=20, help="Number of optimization trials")
+    parser.add_argument("--n_trials", type=int, default=100, help="Number of optimization trials")
     parser.add_argument("--random_seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--start_trial", type=int, default=None,
                         help="Trial number to start from (if None, auto-detect)")

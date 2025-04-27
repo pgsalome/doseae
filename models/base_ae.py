@@ -159,49 +159,6 @@ class Conv3DBlock(nn.Module):
         return x
 
 
-class DeconvBlock(nn.Module):
-    """
-    3D transposed convolutional block with batch normalization and activation.
-    """
-
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1,
-                 output_padding=1, bias=False, activation=nn.ReLU()):
-        """
-        Initialize the 3D transposed convolutional block.
-
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            kernel_size (int): Kernel size
-            stride (int): Stride
-            padding (int): Padding
-            output_padding (int): Output padding
-            bias (bool): Whether to use bias
-            activation (nn.Module): Activation function
-        """
-        super(DeconvBlock, self).__init__()
-        self.deconv = nn.ConvTranspose3d(
-            in_channels, out_channels, kernel_size=kernel_size,
-            stride=stride, padding=padding, output_padding=output_padding, bias=bias
-        )
-        self.bn = nn.BatchNorm3d(out_channels)
-        self.activation = activation
-
-    def forward(self, x):
-        """
-        Forward pass through the block.
-
-        Args:
-            x (torch.Tensor): Input tensor
-
-        Returns:
-            torch.Tensor: Output after transposed convolution, batch norm, and activation
-        """
-        x = self.deconv(x)
-        x = self.bn(x)
-        if self.activation is not None:
-            x = self.activation(x)
-        return x
 
 
 class ResidualBlock3D(nn.Module):
@@ -257,3 +214,47 @@ class ResidualBlock3D(nn.Module):
         out = self.activation(out)
 
         return out
+
+class DeconvBlock(nn.Module):
+    """
+    3D transposed convolutional block with batch normalization and activation.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1,
+                 output_padding=0, bias=False, activation=nn.ReLU()):
+        """
+        Initialize the 3D transposed convolutional block.
+
+        Args:
+            in_channels (int): Number of input channels
+            out_channels (int): Number of output channels
+            kernel_size (int): Kernel size
+            stride (int): Stride
+            padding (int): Padding
+            output_padding (int): Output padding to control output size
+            bias (bool): Whether to use bias
+            activation (nn.Module): Activation function
+        """
+        super(DeconvBlock, self).__init__()
+        self.deconv = nn.ConvTranspose3d(
+            in_channels, out_channels, kernel_size=kernel_size,
+            stride=stride, padding=padding, output_padding=output_padding, bias=bias
+        )
+        self.bn = nn.BatchNorm3d(out_channels)
+        self.activation = activation
+
+    def forward(self, x):
+        """
+        Forward pass through the block.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output after transposed convolution, batch norm, and activation
+        """
+        x = self.deconv(x)
+        x = self.bn(x)
+        if self.activation is not None:
+            x = self.activation(x)
+        return x

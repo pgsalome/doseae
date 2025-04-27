@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .base_ae import BaseAutoencoder, ResidualBlock3D, Conv3DBlock, DeconvBlock
 
 
@@ -8,7 +9,7 @@ class ResNetEncoder(nn.Module):
     ResNet-style encoder for 3D dose distribution.
     """
 
-    def __init__(self, in_channels=1, base_filters=32, latent_dim=128):
+    def __init__(self, in_channels=1, base_filters=32, latent_dim=128, input_size=(64, 64, 64)):
         """
         Initialize the ResNet encoder.
 
@@ -16,8 +17,14 @@ class ResNetEncoder(nn.Module):
             in_channels (int): Number of input channels
             base_filters (int): Number of base filters
             latent_dim (int): Dimension of the latent space
+            input_size (tuple): Input dimensions (D, H, W)
         """
         super(ResNetEncoder, self).__init__()
+
+        # Store input size and base filters
+        self.input_size = input_size
+        self.base_filters = base_filters
+        self.latent_dim = latent_dim
 
         # Initial convolution
         self.initial = nn.Sequential(
@@ -33,16 +40,10 @@ class ResNetEncoder(nn.Module):
         self.layer3 = self._make_layer(base_filters * 2, base_filters * 4, blocks=2, stride=2)
         self.layer4 = self._make_layer(base_filters * 4, base_filters * 8, blocks=2, stride=2)
 
-        # Assuming input size is 64x64x64
-        # After initial: 32x32x32
-        # After layer1: 32x32x32
-        # After layer2: 16x16x16
-        # After layer3: 8x8x8
-        # After layer4: 4x4x4
-        self.flatten_size = base_filters * 8 * 4 * 4 * 4
-
-        # Final projection to latent space
-        self.fc = nn.Linear(self.flatten_size, latent_dim)
+        # We'll initialize the flatten_size and fc in the first forward pass
+        self.flatten_size = None
+        self.fc = None
+        self.is_initialized = False
 
     def _make_layer(self, in_channels, out_channels, blocks, stride=1):
         """
@@ -78,19 +79,31 @@ class ResNetEncoder(nn.Module):
         Returns:
             torch.Tensor: Encoded latent vector
         """
+        input_shape = x.shape  # Store input shape for decoder
+
         x = self.initial(x)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
 
-        # Global average pooling
-        x = torch.mean(x, dim=(2, 3, 4))
+        # Store encoded feature shape for decoder
+        encoded_feature_shape = x.shape[2:]
+
+        # Flatten the output
+        flattened = x.view(x.size(0), -1)
+
+        # Initialize the fc layer if this is the first forward pass
+        if not self.is_initialized:
+            self.flatten_size = flattened.size(1)
+            print(f"Initializing fc layer with input size: {self.flatten_size}, output size: {self.latent_dim}")
+            self.fc = nn.Linear(self.flatten_size, self.latent_dim).to(x.device)
+            self.is_initialized = True
 
         # Project to latent space
-        x = self.fc(x)
+        z = self.fc(flattened)
 
-        return x
+        return z, encoded_feature_shape, input_shape
 
 
 class ResNetDecoder(nn.Module):
@@ -109,32 +122,35 @@ class ResNetDecoder(nn.Module):
         """
         super(ResNetDecoder, self).__init__()
 
-        # Initial projection from latent space
-        self.fc = nn.Linear(latent_dim, base_filters * 8 * 4 * 4 * 4)
+        self.latent_dim = latent_dim
+        self.base_filters = base_filters
 
-        # Reshape to 3D volume
-        self.unflatten = nn.Unflatten(1, (base_filters * 8, 4, 4, 4))
+        # We'll initialize these in the first forward pass
+        self.fc = None
+        self.encoded_shape = None
+        self.input_shape = None
+        self.is_initialized = False
 
-        # Upsampling blocks with residual connections
+        # Prepare upsampling blocks that don't depend on dimensions
         self.up1 = nn.Sequential(
-            DeconvBlock(base_filters * 8, base_filters * 4),
+            DeconvBlock(base_filters * 8, base_filters * 4, kernel_size=2, stride=2, padding=0, output_padding=0),
             ResidualBlock3D(base_filters * 4, base_filters * 4)
-        )  # 8x8x8
+        )
 
         self.up2 = nn.Sequential(
-            DeconvBlock(base_filters * 4, base_filters * 2),
+            DeconvBlock(base_filters * 4, base_filters * 2, kernel_size=2, stride=2, padding=0, output_padding=0),
             ResidualBlock3D(base_filters * 2, base_filters * 2)
-        )  # 16x16x16
+        )
 
         self.up3 = nn.Sequential(
-            DeconvBlock(base_filters * 2, base_filters),
+            DeconvBlock(base_filters * 2, base_filters, kernel_size=2, stride=2, padding=0, output_padding=0),
             ResidualBlock3D(base_filters, base_filters)
-        )  # 32x32x32
+        )
 
         self.up4 = nn.Sequential(
-            DeconvBlock(base_filters, base_filters // 2),
+            DeconvBlock(base_filters, base_filters // 2, kernel_size=2, stride=2, padding=0, output_padding=0),
             ResidualBlock3D(base_filters // 2, base_filters // 2)
-        )  # 64x64x64
+        )
 
         # Final convolution to output channels
         self.final = nn.Sequential(
@@ -142,23 +158,50 @@ class ResNetDecoder(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, z, encoded_shape=None, input_shape=None):
         """
         Forward pass through the decoder.
 
         Args:
-            x (torch.Tensor): Latent vector
+            z (torch.Tensor): Latent vector
+            encoded_shape (tuple, optional): Spatial dimensions of the encoded features
+            input_shape (tuple, optional): Original input shape for final interpolation
 
         Returns:
             torch.Tensor: Reconstructed output
         """
-        x = self.fc(x)
-        x = self.unflatten(x)
+        # Initialize on first forward pass
+        if not self.is_initialized:
+            if encoded_shape is None:
+                # Default small encoded shape if not provided
+                encoded_shape = (1, 1, 1)
+                print(f"Warning: Using default encoded shape: {encoded_shape}")
+
+            self.encoded_shape = encoded_shape
+            flatten_size = self.base_filters * 8 * encoded_shape[0] * encoded_shape[1] * encoded_shape[2]
+            print(f"Initializing decoder fc layer with input size: {self.latent_dim}, output size: {flatten_size}")
+            self.fc = nn.Linear(self.latent_dim, flatten_size).to(z.device)
+            self.is_initialized = True
+
+            if input_shape is not None:
+                self.input_shape = input_shape
+
+        # Project from latent space
+        x = self.fc(z)
+
+        # Reshape to 3D volume
+        x = x.view(-1, self.base_filters * 8, *self.encoded_shape)
+
+        # Upsample
         x = self.up1(x)
         x = self.up2(x)
         x = self.up3(x)
         x = self.up4(x)
         x = self.final(x)
+
+        # Ensure output matches input shape exactly using interpolation
+        if self.input_shape is not None and x.shape != self.input_shape:
+            x = F.interpolate(x, size=self.input_shape[2:], mode='trilinear', align_corners=False)
 
         return x
 
@@ -180,25 +223,57 @@ class ResNetAutoencoder(BaseAutoencoder):
         """
         super(ResNetAutoencoder, self).__init__(in_channels, latent_dim)
 
+        # Store parameters
         self.input_size = input_size
+        self.base_filters = base_filters
 
-        # Calculate dimensions after encoding (divide by 16 for 4 layers of stride 2)
-        self.encoded_size = (
-            input_size[0] // 16,
-            input_size[1] // 16,
-            input_size[2] // 16
-        )
+        # Initialize encoder and decoder
+        self.encoder = ResNetEncoder(in_channels, base_filters, latent_dim, input_size)
+        self.decoder = ResNetDecoder(latent_dim, base_filters, in_channels)
 
-        # Encoder
-        self.encoder = ResNetEncoder(
-            in_channels,
-            base_filters,
-            latent_dim
-        )
+        # This will store the encoded and input shapes
+        self.encoded_shape = None
+        self.orig_input_shape = None
 
-        # Decoder
-        self.decoder = ResNetDecoder(
-            latent_dim,
-            base_filters,
-            in_channels
-        )
+    def encode(self, x):
+        """
+        Encode input into latent space.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Encoded latent representation
+        """
+        # Get latent vector and shapes
+        z, encoded_shape, input_shape = self.encoder(x)
+        # Save shapes for decoder
+        self.encoded_shape = encoded_shape
+        self.orig_input_shape = input_shape
+        return z
+
+    def decode(self, z):
+        """
+        Decode from latent space.
+
+        Args:
+            z (torch.Tensor): Latent representation
+
+        Returns:
+            torch.Tensor: Decoded output
+        """
+        return self.decoder(z, self.encoded_shape, self.orig_input_shape)
+
+    def forward(self, x):
+        """
+        Forward pass through the autoencoder.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Reconstructed output
+        """
+        z = self.encode(x)
+        x_recon = self.decode(z)
+        return x_recon

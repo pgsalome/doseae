@@ -1,0 +1,19 @@
+{
+  "timestamp": "20250427_033523",
+  "best_validation_loss": 0.00027558842149396105,
+  "best_parameters": {
+    "model.type": "unet_ae",
+    "model.in_channels": 1,
+    "model.latent_dim": 217,
+    "model.base_filters": 49,
+    "hyperparameters.learning_rate": 0.007040471610808101,
+    "hyperparameters.batch_size": 16,
+    "hyperparameters.weight_decay": 5.7409096078795824e-05,
+    "training.optimizer": "sgd",
+    "training.scheduler": "cosine_annealing",
+    "preprocessing.normalize": false,
+    "preprocessing.use_tanh_output": false
+  },
+  "total_trials": 100,
+  "resumed_from_trial": null
+}

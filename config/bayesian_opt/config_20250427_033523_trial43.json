@@ -1,0 +1,124 @@
+{
+  "dataset": {
+    "data_dir": "/media/e210/HD81/Adhvaith_datasets/nsclc_public",
+    "data_pkl": "/media/e210/HD81/Adhvaith_datasets/results/datasets/volumes_dataset.pkl",
+    "train_ratio": 0.8,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "input_size": [
+      64,
+      64,
+      64
+    ],
+    "input_size_2d": 256,
+    "patch_size": [
+      64,
+      64
+    ],
+    "patch_size_3d": [
+      50,
+      50,
+      50
+    ],
+    "use_single_file": false,
+    "data_file": null,
+    "test_mode": false,
+    "n_test_samples": 20
+  },
+  "preprocessing": {
+    "normalize": false,
+    "normalize_method": "95percentile",
+    "percentile_norm": 95,
+    "voxel_spacing": [
+      2,
+      2,
+      2
+    ],
+    "resize_to": [
+      64,
+      64,
+      64
+    ],
+    "unit_type": "voxels",
+    "extract_slices": false,
+    "slice_extraction": "informative",
+    "non_zero_threshold": 0.05,
+    "num_workers": 8,
+    "batch_size": 1000,
+    "use_tanh_output": false
+  },
+  "transforms": {
+    "augment": true,
+    "rotate": true,
+    "flip": true,
+    "adjust_brightness": true,
+    "random_crop": false,
+    "random_noise": false
+  },
+  "patch_extraction": {
+    "enable": false,
+    "patch_dimension": "3D",
+    "patch_size": [
+      50,
+      50,
+      50
+    ],
+    "patch_unit_type": "voxels",
+    "threshold": 0.01,
+    "max_patches_per_slice": 100,
+    "max_patches_per_volume": 500,
+    "random_state": 42
+  },
+  "model": {
+    "type": "unet_ae",
+    "is_2d": false,
+    "latent_dim": 496,
+    "in_channels": 1,
+    "base_filters": 57,
+    "bottleneck_filters": 256,
+    "dropout_rate": 0.3
+  },
+  "hyperparameters": {
+    "learning_rate": 0.0060301251608056135,
+    "batch_size": 16,
+    "epochs": 100,
+    "early_stopping_patience": 10,
+    "weight_decay": 2.7560279001515325e-05,
+    "beta": 1.0
+  },
+  "training": {
+    "optimizer": "sgd",
+    "scheduler": "cosine_annealing",
+    "loss": "mse",
+    "gpu_id": 0,
+    "seed": 42,
+    "grad_clip": 0.1,
+    "non_zero_loss": false,
+    "accumulation_steps": 1
+  },
+  "wandb": {
+    "use_wandb": true,
+    "project_name": "dose_distribution_autoencoder",
+    "entity": "pgsalome",
+    "name": "trial_43",
+    "group": "opt_20250427_033523",
+    "tags": [
+      "optimization",
+      "trial_43"
+    ]
+  },
+  "optuna": {
+    "use_optuna": false,
+    "n_trials": 50,
+    "timeout": 86400,
+    "direction": "minimize",
+    "sampler": "tpe",
+    "pruner": "median"
+  },
+  "output": {
+    "model_dir": "/media/e210/HD81/Adhvaith_datasets/results/models",
+    "log_dir": "/media/e210/HD81/Adhvaith_datasets/results/logs",
+    "results_dir": "/media/e210/HD81/Adhvaith_datasets/results"
+  },
+  "trial_num": 43
+}

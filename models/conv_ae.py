@@ -23,6 +23,7 @@ class ConvAutoencoder3D(BaseAutoencoder):
         super(ConvAutoencoder3D, self).__init__(in_channels, latent_dim)
 
         self.input_size = input_size
+        self.base_filters = base_filters  # Save base_filters as an instance attribute
 
         # Calculate encoded feature map size after 3 downsampling operations
         self.encoded_size = (
@@ -67,13 +68,13 @@ class ConvAutoencoder3D(BaseAutoencoder):
         # Decoder
         self.decoder = nn.Sequential(
             # Input: [batch, base_filters*8, D/8, H/8, W/8]
-            DeconvBlock(base_filters * 8, base_filters * 4, kernel_size=2, stride=2, padding=0),
+            DeconvBlock(base_filters * 8, base_filters * 4, kernel_size=2, stride=2, padding=0, output_padding=0),
             nn.Dropout3d(dropout_rate),
 
-            DeconvBlock(base_filters * 4, base_filters * 2, kernel_size=2, stride=2, padding=0),
+            DeconvBlock(base_filters * 4, base_filters * 2, kernel_size=2, stride=2, padding=0, output_padding=0),
             nn.Dropout3d(dropout_rate),
 
-            DeconvBlock(base_filters * 2, base_filters, kernel_size=2, stride=2, padding=0),
+            DeconvBlock(base_filters * 2, base_filters, kernel_size=2, stride=2, padding=0, output_padding=0),
             nn.Dropout3d(dropout_rate),
 
             nn.Conv3d(base_filters, in_channels, kernel_size=3, padding=1),
@@ -104,7 +105,8 @@ class ConvAutoencoder3D(BaseAutoencoder):
             torch.Tensor: Decoded output
         """
         features = self.bottleneck_decoder(z)
-        features = features.view(-1, 8 * self.base_filters, *self.encoded_size)
+        # Reshape the features to match the expected input shape for the decoder
+        features = features.view(-1, self.base_filters * 8, *self.encoded_size)
         return self.decoder(features)
 
     def forward(self, x):
@@ -118,7 +120,8 @@ class ConvAutoencoder3D(BaseAutoencoder):
             torch.Tensor: Reconstructed output
         """
         z = self.encode(x)
-        return self.decode(z)
+        x_recon = self.decode(z)
+        return x_recon
 
     def get_losses(self, x, x_recon):
         """
