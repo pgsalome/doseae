@@ -52,8 +52,10 @@ def define_study_params(trial):
     """Define the parameters for a trial in the Optuna study."""
     params = {}
 
-    # Only use UNet for now since it seems to work
-    params["model.type"] = "unet_ae"
+    # Select model type
+    params["model.type"] = trial.suggest_categorical(
+        "model.type", ["unet_ae", "vae", "resnet_ae", "mlp_autoencoder", "conv_autoencoder"]
+    )
 
     # Use consistent channels
     params["model.in_channels"] = 1
@@ -95,6 +97,12 @@ def define_study_params(trial):
     params["preprocessing.use_tanh_output"] = trial.suggest_categorical(
         "preprocessing.use_tanh_output", [True, False]
     )
+
+    # Add VAE-specific parameter when model type is VAE
+    if params["model.type"] == "vae":
+        params["hyperparameters.beta"] = trial.suggest_float(
+            "hyperparameters.beta", 0.1, 10.0, log=True
+        )
 
     return params
 

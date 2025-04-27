@@ -26,7 +26,7 @@
     "n_test_samples": 20
   },
   "preprocessing": {
-    "normalize": false,
+    "normalize": true,
     "normalize_method": "95percentile",
     "percentile_norm": 95,
     "voxel_spacing": [
@@ -45,7 +45,7 @@
     "non_zero_threshold": 0.05,
     "num_workers": 8,
     "batch_size": 1000,
-    "use_tanh_output": false
+    "use_tanh_output": true
   },
   "transforms": {
     "augment": true,
@@ -70,25 +70,25 @@
     "random_state": 42
   },
   "model": {
-    "type": "unet_ae",
+    "type": "resnet_ae",
     "is_2d": false,
-    "latent_dim": 70,
+    "latent_dim": 101,
     "in_channels": 1,
-    "base_filters": 16,
+    "base_filters": 21,
     "bottleneck_filters": 256,
     "dropout_rate": 0.3
   },
   "hyperparameters": {
-    "learning_rate": 0.0006740513796374046,
-    "batch_size": 64,
+    "learning_rate": 2.2887381144600954e-05,
+    "batch_size": 16,
     "epochs": 100,
     "early_stopping_patience": 10,
-    "weight_decay": 5.232216089948754e-06,
+    "weight_decay": 0.00012854549964879015,
     "beta": 1.0
   },
   "training": {
-    "optimizer": "rmsprop",
-    "scheduler": "none",
+    "optimizer": "sgd",
+    "scheduler": "cosine_annealing",
     "loss": "mse",
     "gpu_id": 0,
     "seed": 42,
@@ -100,11 +100,11 @@
     "use_wandb": true,
     "project_name": "dose_distribution_autoencoder",
     "entity": "pgsalome",
-    "name": "trial_4",
-    "group": "opt_20250427_004938",
+    "name": "trial_3",
+    "group": "opt_20250427_024643",
     "tags": [
       "optimization",
-      "trial_4"
+      "trial_3"
     ]
   },
   "optuna": {
@@ -120,5 +120,5 @@
     "log_dir": "/media/e210/HD81/Adhvaith_datasets/results/logs",
     "results_dir": "/media/e210/HD81/Adhvaith_datasets/results"
   },
-  "trial_num": 4
+  "trial_num": 3
 }

@@ -26,7 +26,7 @@
     "n_test_samples": 20
   },
   "preprocessing": {
-    "normalize": true,
+    "normalize": false,
     "normalize_method": "95percentile",
     "percentile_norm": 95,
     "voxel_spacing": [
@@ -70,25 +70,25 @@
     "random_state": 42
   },
   "model": {
-    "type": "unet_ae",
+    "type": "vae",
     "is_2d": false,
-    "latent_dim": 74,
+    "latent_dim": 134,
     "in_channels": 1,
-    "base_filters": 18,
+    "base_filters": 34,
     "bottleneck_filters": 256,
     "dropout_rate": 0.3
   },
   "hyperparameters": {
-    "learning_rate": 0.0011290133559092666,
-    "batch_size": 32,
+    "learning_rate": 3.585612610345396e-05,
+    "batch_size": 8,
     "epochs": 100,
     "early_stopping_patience": 10,
-    "weight_decay": 0.0005345166110646819,
-    "beta": 1.0
+    "weight_decay": 6.218704727769077e-05,
+    "beta": 1.2172847081122433
   },
   "training": {
-    "optimizer": "sgd",
-    "scheduler": "cosine_annealing",
+    "optimizer": "adam",
+    "scheduler": "none",
     "loss": "mse",
     "gpu_id": 0,
     "seed": 42,
@@ -101,7 +101,7 @@
     "project_name": "dose_distribution_autoencoder",
     "entity": "pgsalome",
     "name": "trial_1",
-    "group": "opt_20250427_004938",
+    "group": "opt_20250427_024643",
     "tags": [
       "optimization",
       "trial_1"

@@ -189,19 +189,16 @@ class ResNetAutoencoder(BaseAutoencoder):
             input_size[2] // 16
         )
 
-        # Pass this size to the encoder and decoder
+        # Encoder
         self.encoder = ResNetEncoder(
             in_channels,
             base_filters,
-            latent_dim,
-            input_size=input_size,
-            encoded_size=self.encoded_size
+            latent_dim
         )
 
+        # Decoder
         self.decoder = ResNetDecoder(
             latent_dim,
             base_filters,
-            in_channels,
-            encoded_size=self.encoded_size,
-            output_size=input_size
+            in_channels
         )

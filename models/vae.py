@@ -157,7 +157,13 @@ class VAE(BaseAutoencoder):
         Returns:
             dict: Dictionary of loss components
         """
-        # Reconstruction loss (MSE or BCE)
+        # Check for size mismatch and resize if necessary
+        if x.shape != x_recon.shape:
+            print(f"Input shape {x.shape} and reconstructed shape {x_recon.shape} don't match. Resizing...")
+            import torch.nn.functional as F
+            x_recon = F.interpolate(x_recon, size=x.shape[2:], mode='trilinear', align_corners=False)
+
+        # Reconstruction loss (MSE)
         recon_loss = F.mse_loss(x_recon, x, reduction='mean')
 
         # KL divergence
