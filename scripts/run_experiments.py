@@ -270,7 +270,7 @@ class NumpyEncoder(json.JSONEncoder):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run optimization experiments")
     parser.add_argument("--base_config", default="config/config.yaml", type=str, help="Path to base config file")
-    parser.add_argument("--output_dir", type=str, default="./config/bayesian_opt", help="Directory to save configs")
+    parser.add_argument("--output_dir", type=str, default="./config/bayesian_opt_patches", help="Directory to save configs")
     parser.add_argument("--results_file", type=str, default="./results/bayesian_opt_results_image.csv",
                         help="Path to save results")
     parser.add_argument("--n_trials", type=int, default=100, help="Number of optimization trials")

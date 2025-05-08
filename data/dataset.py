@@ -8,7 +8,7 @@ import nrrd
 import pickle
 import re
 
-from .preprocess import normalize_tensor
+
 from .transforms import augment_data
 
 def natural_sort(file_list):

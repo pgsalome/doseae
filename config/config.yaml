@@ -1,10 +1,10 @@
 dataset:
   data_dir: '/media/e210/HD81/Adhvaith_datasets/nsclc_public'
-  data_pkl: '/media/e210/HD81/Adhvaith_datasets/results/datasets/volumes_dataset.pkl'
+  data_pkl:  '/media/e210/HD81/Adhvaith_datasets/results_patch/datasets/patches_dataset.pkl'
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
-  input_size: [64, 64, 64]  # 3D input size (D, H, W)
+  input_size: [25,25,25]  # 3D input size (D, H, W)
   input_size_2d: 256  # 2D input size (square images)
   patch_size: [64, 64]  # Size of patches for 2D data
   patch_size_3d: [50, 50, 50]  # Size of patches for 3D data
@@ -19,13 +19,13 @@ preprocessing:  # Keep this as 'preprocessing' for compatibility
   normalize_method: "95percentile"  # "95percentile", "minmax", "zscore", or "prescription"
   percentile_norm: 95  # Percentile for normalization (0-100)
   voxel_spacing: [1, 1, 1]  # Physical spacing in mm (isotropic or anisotropic)
-  resize_to: [256, 256, 256]  # Target size for resampling, null to keep original size
+  resize_to: [64, 64, 64] # Target size for resampling, null to keep original size
   unit_type: "voxels"  # "voxels" or "mm" - how size values are interpreted
   extract_slices: false  # Whether to extract 2D slices from 3D volumes
   slice_extraction: "informative"  # "all", "center", or "informative"
   non_zero_threshold: 0.05  # For informative slice extraction
   num_workers: 8  # Number of parallel workers
-  batch_size: 1000  # Batch size for saving
+  batch_size: 1  # Batch size for saving
   use_tanh_output: true  # Keep this here for compatibility
 
 # Settings for transforms during training (conceptually separate but not used by preprocessing script)
@@ -76,9 +76,9 @@ training:
 
 wandb:
   use_wandb: true
-  project_name: 'dose_distribution_autoencoder'
+  project_name: 'dose_distribution_autoencoder_patches'
   entity: 'pgsalome'
-  name: 'doseae'  # Run name (will be auto-generated if null)
+  name: 'doseae_patches'  # Run name (will be auto-generated if null)
 
 optuna:
   use_optuna: false
