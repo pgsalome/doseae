@@ -16,6 +16,9 @@ import logging
 from models import get_model
 from data.dataset import create_data_loaders
 from utils.optimization import objective as optuna_objective
+from utils.clinical_metrics import ClinicalMetricsCalculator
+from utils.clinical_loss import ClinicalLoss
+from utils.visualization import find_high_dose_slice
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -147,17 +150,94 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, normalize_outputs=True):
     return BCE + beta * KLD
 
 
+def log_high_dose_slice(model, val_loader, epoch, device, config):
+    """
+    Log the slice with highest dose area to wandb.
+    """
+    if not config.get('logging', {}).get('log_high_dose_slice', True):
+        return
+
+    if epoch % config.get('logging', {}).get('log_frequency', 1) != 0:
+        return
+
+    model.eval()
+
+    # Get a batch from validation
+    batch = next(iter(val_loader))
+
+    # Get data
+    if isinstance(batch, dict):
+        data = batch["image"].to(device)
+    else:
+        data, _ = batch
+        data = data.to(device)
+
+    # Add channel dimension if needed
+    if data.ndim == 3:  # [B, H, W]
+        data = data.unsqueeze(1)  # [B, 1, H, W]
+
+    # Get reconstruction
+    with torch.no_grad():
+        if config['model']['type'] == 'vae':
+            recon, _, _ = model(data)
+        else:
+            recon = model(data)
+            if isinstance(recon, tuple):
+                recon = recon[0]
+
+    # Find high dose slice
+    high_dose_idx = find_high_dose_slice(data)
+
+    # Extract slices
+    if data.dim() == 5:  # 3D data
+        original_slice = data[0, 0, high_dose_idx].cpu().numpy()
+        recon_slice = recon[0, 0, high_dose_idx].cpu().numpy()
+    else:  # 2D data
+        original_slice = data[0, 0].cpu().numpy()
+        recon_slice = recon[0, 0].cpu().numpy()
+
+    # Create comparison figure
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Original
+    im1 = axes[0].imshow(original_slice, cmap='jet')
+    axes[0].set_title('Original')
+    axes[0].axis('off')
+    plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+
+    # Reconstructed
+    im2 = axes[1].imshow(recon_slice, cmap='jet')
+    axes[1].set_title('Reconstructed')
+    axes[1].axis('off')
+    plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+
+    # Difference
+    diff = np.abs(original_slice - recon_slice)
+    im3 = axes[2].imshow(diff, cmap='hot')
+    axes[2].set_title('Absolute Difference')
+    axes[2].axis('off')
+    plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
+
+    plt.suptitle(f'High Dose Slice - Epoch {epoch}')
+    plt.tight_layout()
+
+    # Log to wandb
+    if config['wandb']['use_wandb']:
+        wandb.log({
+            'high_dose_slice/comparison': wandb.Image(fig),
+            'high_dose_slice/original_max': original_slice.max(),
+            'high_dose_slice/recon_max': recon_slice.max(),
+            'high_dose_slice/max_diff': diff.max(),
+            'high_dose_slice/mean_diff': diff.mean(),
+            'high_dose_slice/slice_index': high_dose_idx
+        })
+
+    plt.close(fig)
+
+
 def log_images(model, val_loader, epoch, device, config, interval=10):
     """
     Log input and reconstructed images to wandb.
-
-    Args:
-        model (nn.Module): Model to evaluate
-        val_loader (DataLoader): Validation data loader
-        epoch (int): Current epoch
-        device (torch.device): Device
-        config (dict): Configuration
-        interval (int): Interval for logging images
     """
     if (epoch + 1) % interval != 0:
         return
@@ -225,234 +305,96 @@ def log_images(model, val_loader, epoch, device, config, interval=10):
                     return
 
 
-def calculate_iqr(values):
+def train_epoch_with_clinical_loss(model, data_loader, optimizer, loss_fn, device, config, epoch):
     """
-    Calculate interquartile range (IQR) for a set of values.
-
-    Args:
-        values (numpy.ndarray): Values to calculate IQR for
-
-    Returns:
-        tuple: First quartile (Q1), third quartile (Q3), and IQR
+    Training epoch with clinical loss function.
     """
-    Q1 = np.percentile(values, 25)
-    Q3 = np.percentile(values, 75)
-    IQR = Q3 - Q1
-    return Q1, Q3, IQR
+    model.train()
+    running_losses = {}
 
-
-def define_bins(zc_values):
-    """
-    Define bin edges based on IQR.
-
-    Args:
-        zc_values (numpy.ndarray): Values to define bins for
-
-    Returns:
-        numpy.ndarray: Array of bin edges
-    """
-    Q1, Q3, IQR = calculate_iqr(zc_values)
-    bin_edges = sorted([
-        zc_values.min(),
-        Q1 - 1.5 * IQR,
-        Q1,
-        Q3,
-        Q3 + 1.5 * IQR,
-        zc_values.max()
-    ])
-    return bin_edges
-
-
-def assign_bins(zc_values, bin_edges):
-    """
-    Assign values to bins.
-
-    Args:
-        zc_values (numpy.ndarray): Values to assign to bins
-        bin_edges (numpy.ndarray): Bin edges
-
-    Returns:
-        numpy.ndarray: Bin assignments
-    """
-    bins = np.digitize(zc_values, bin_edges, right=True)
-    return bins
-
-
-def custom_stratified_split_by_bins(dataset, test_size=0.2, random_state=42):
-    """
-    Perform a stratified split of a dataset based on the non-zero count.
-
-    Args:
-        dataset (Dataset): Dataset to split
-        test_size (float): Fraction of dataset to use for validation
-        random_state (int): Random seed for reproducibility
-
-    Returns:
-        tuple: Train dataset and validation dataset
-    """
-    if not hasattr(dataset, 'zc_values'):
-        raise ValueError("Dataset must have 'zc_values' attribute for stratified split")
-
-    zc_values = np.array(dataset.zc_values)
-    bin_edges = define_bins(zc_values)
-    bins = assign_bins(zc_values, bin_edges)
-
-    train_indices = []
-    val_indices = []
-
-    for bin_value in np.unique(bins):
-        indices = np.where(bins == bin_value)[0]
-        train_size = int((1 - test_size) * len(indices))
-        train_idx, val_idx = train_test_split(
-            indices, test_size=len(indices) - train_size, random_state=random_state
-        )
-
-        train_indices.extend(train_idx)
-        val_indices.extend(val_idx)
-
-    train_dataset = Subset(dataset, train_indices)
-    val_dataset = Subset(dataset, val_indices)
-
-    return train_dataset, val_dataset
-
-
-def adjust_learning_rate(scheduler, optimizer, avg_val_loss, epoch):
-    """
-    Adjust learning rate using scheduler and log the change.
-
-    Args:
-        scheduler: Learning rate scheduler
-        optimizer: Optimizer
-        avg_val_loss: Average validation loss
-        epoch: Current epoch
-    """
-    if scheduler is None:
-        return
-
-    current_lr = optimizer.param_groups[0]["lr"]
-    print(f"Epoch [{epoch + 1}], Learning Rate before scheduler step: {current_lr:.10f}")
-
-    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-        scheduler.step(avg_val_loss)
-    else:
-        scheduler.step()
-
-    new_lr = optimizer.param_groups[0]["lr"]
-    print(f"Epoch [{epoch + 1}], Learning Rate after scheduler step: {new_lr:.10f}")
-
-
-def visualize_reconstructions(model, data_loader, device, config, epoch, output_dir):
-    """
-    Visualize original and reconstructed images.
-
-    Args:
-        model (nn.Module): Trained model
-        data_loader (DataLoader): Data loader
-        device (torch.device): Device
-        config (dict): Configuration
-        epoch (int): Current epoch
-        output_dir (str): Output directory
-    """
-    model.eval()
-
-    # Get a batch of data
-    batch = next(iter(data_loader))
-
-    # Handle different dataset types
-    if isinstance(batch, dict):  # For DoseAEDataset
-        data = batch["image"].to(device)
-    else:  # For standard (input, target) dataset
-        data, _ = batch
-        data = data.to(device)
-
-    # Add channel dimension if needed
-    if data.ndim == 3:  # [B, H, W]
-        data = data.unsqueeze(1)  # [B, 1, H, W]
-
-    with torch.no_grad():
-        # Forward pass - handle different model types
-        outputs = model(data)
-
-        # Extract reconstructed output
-        if isinstance(outputs, tuple):
-            recon = outputs[0]  # For models that return multiple values (like VAE)
+    for batch_idx, batch in enumerate(tqdm(data_loader, desc="Training")):
+        # Get data
+        if isinstance(batch, dict):
+            data = batch["image"].to(device)
+            mask = batch.get("mask", None)
+            if mask is not None:
+                mask = mask.to(device)
         else:
-            recon = outputs
+            data, _ = batch
+            data = data.to(device)
+            mask = None
 
-    # Create visualization
-    is_2d = config['model'].get('is_2d', False)
+        # Add channel dimension if needed
+        if data.ndim == 3:  # [B, H, W]
+            data = data.unsqueeze(1)  # [B, 1, H, W]
 
-    if is_2d:
-        # 2D visualization
-        fig, axes = plt.subplots(2, min(4, data.size(0)), figsize=(12, 6))
+        # Check for NaN in input
+        check_for_nan(data, "input data")
 
-        for i in range(min(4, data.size(0))):
-            # Original
-            axes[0, i].imshow(data[i, 0].cpu().numpy(), cmap='viridis')
-            axes[0, i].set_title(f"Original {i + 1}")
-            axes[0, i].axis('off')
+        # Forward pass
+        if config['model']['type'] == 'vae':
+            recon, mu, logvar = model(data)
 
-            # Reconstructed
-            axes[1, i].imshow(recon[i, 0].cpu().numpy(), cmap='viridis')
-            axes[1, i].set_title(f"Reconstructed {i + 1}")
-            axes[1, i].axis('off')
-    else:
-        # 3D visualization - central slices
-        fig, axes = plt.subplots(3, min(4, data.size(0)), figsize=(12, 9))
+            # VAE losses
+            if isinstance(loss_fn, ClinicalLoss):
+                losses = loss_fn(recon, data, mask)
 
-        for i in range(min(4, data.size(0))):
-            # Get central slices
-            d, h, w = data.shape[2], data.shape[3], data.shape[4]
+                # Add KL divergence for VAE
+                kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+                kl_loss = kl_loss / data.size(0)
 
-            # Original slices
-            orig_slice_d = data[i, 0, d // 2, :, :].cpu().numpy()
-            orig_slice_h = data[i, 0, :, h // 2, :].cpu().numpy()
-            orig_slice_w = data[i, 0, :, :, w // 2].cpu().numpy()
+                beta = config['hyperparameters'].get('beta', 1.0)
+                losses['kl'] = kl_loss
+                losses['kl_weighted'] = beta * kl_loss
+                losses['total'] = losses['total'] + beta * kl_loss
+            else:
+                # Standard VAE loss
+                loss = vae_loss_function(recon, data, mu, logvar,
+                                         beta=config['hyperparameters'].get('beta', 1.0),
+                                         normalize_outputs=config['preprocessing'].get('use_tanh_output', True))
+                losses = {'total': loss}
+        else:
+            # Non-VAE models
+            recon = model(data)
+            if isinstance(recon, tuple):
+                recon = recon[0]
 
-            # Reconstructed slices
-            recon_slice_d = recon[i, 0, d // 2, :, :].cpu().numpy()
-            recon_slice_h = recon[i, 0, :, h // 2, :].cpu().numpy()
-            recon_slice_w = recon[i, 0, :, :, w // 2].cpu().numpy()
+            if isinstance(loss_fn, ClinicalLoss):
+                losses = loss_fn(recon, data, mask)
+            else:
+                # Standard MSE loss
+                loss = loss_fn(recon, data)
+                losses = {'total': loss}
 
-            # Plot
-            axes[0, i].imshow(orig_slice_d, cmap='viridis')
-            axes[0, i].set_title(f"Original D-slice {i + 1}")
-            axes[0, i].axis('off')
+        # Check for NaN in reconstruction and loss
+        check_for_nan(recon, "reconstructed output")
+        check_for_nan(losses['total'], "loss")
 
-            axes[1, i].imshow(orig_slice_h, cmap='viridis')
-            axes[1, i].set_title(f"Original H-slice {i + 1}")
-            axes[1, i].axis('off')
+        # Backward pass
+        optimizer.zero_grad()
+        losses['total'].backward()
 
-            axes[2, i].imshow(orig_slice_w, cmap='viridis')
-            axes[2, i].set_title(f"Original W-slice {i + 1}")
-            axes[2, i].axis('off')
+        # Gradient clipping
+        if config['training'].get('grad_clip'):
+            nn.utils.clip_grad_norm_(model.parameters(), config['training']['grad_clip'])
 
-    # Save figure
-    os.makedirs(output_dir, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'reconstruction_epoch_{epoch}.png'))
-    plt.close()
+        optimizer.step()
 
-    # Log to wandb if enabled
-    if config['wandb']['use_wandb']:
-        wandb.log({f"reconstructions_epoch_{epoch}": wandb.Image(
-            os.path.join(output_dir, f'reconstruction_epoch_{epoch}.png'))})
+        # Update running losses
+        for loss_name, loss_value in losses.items():
+            if loss_name not in running_losses:
+                running_losses[loss_name] = 0.0
+            running_losses[loss_name] += loss_value.item()
+
+    # Average losses
+    avg_losses = {k: v / len(data_loader) for k, v in running_losses.items()}
+
+    return avg_losses
 
 
 def train_epoch(model, data_loader, optimizer, device, config, accumulation_steps=1):
     """
     Train for one epoch.
-
-    Args:
-        model (nn.Module): Model to train
-        data_loader (DataLoader): Data loader
-        optimizer (torch.optim.Optimizer): Optimizer
-        device (torch.device): Device
-        config (dict): Configuration
-        accumulation_steps (int): Number of steps to accumulate gradients
-
-    Returns:
-        float: Average training loss
     """
     model.train()
     running_loss = 0.0
@@ -535,15 +477,6 @@ def train_epoch(model, data_loader, optimizer, device, config, accumulation_step
 def validate(model, data_loader, device, config):
     """
     Validate the model.
-
-    Args:
-        model (nn.Module): Model to validate
-        data_loader (DataLoader): Data loader
-        device (torch.device): Device
-        config (dict): Configuration
-
-    Returns:
-        float: Average validation loss
     """
     model.eval()
     running_loss = 0.0
@@ -600,15 +533,77 @@ def validate(model, data_loader, device, config):
     return running_loss / len(data_loader)
 
 
+def validate_with_clinical_loss(model, data_loader, loss_fn, device, config):
+    """
+    Validation with clinical loss calculation.
+    """
+    model.eval()
+    running_losses = {}
+
+    with torch.no_grad():
+        for batch in tqdm(data_loader, desc="Validation"):
+            # Get data
+            if isinstance(batch, dict):
+                data = batch["image"].to(device)
+                mask = batch.get("mask", None)
+                if mask is not None:
+                    mask = mask.to(device)
+            else:
+                data, _ = batch
+                data = data.to(device)
+                mask = None
+
+            # Add channel dimension if needed
+            if data.ndim == 3:  # [B, H, W]
+                data = data.unsqueeze(1)  # [B, 1, H, W]
+
+            # Forward pass
+            if config['model']['type'] == 'vae':
+                recon, mu, logvar = model(data)
+
+                # Calculate losses
+                if isinstance(loss_fn, ClinicalLoss):
+                    losses = loss_fn(recon, data, mask)
+
+                    # Add KL divergence
+                    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+                    kl_loss = kl_loss / data.size(0)
+
+                    beta = config['hyperparameters'].get('beta', 1.0)
+                    losses['kl'] = kl_loss
+                    losses['kl_weighted'] = beta * kl_loss
+                    losses['total'] = losses['total'] + beta * kl_loss
+                else:
+                    loss = vae_loss_function(recon, data, mu, logvar,
+                                             beta=config['hyperparameters'].get('beta', 1.0),
+                                             normalize_outputs=config['preprocessing'].get('use_tanh_output', True))
+                    losses = {'total': loss}
+            else:
+                recon = model(data)
+                if isinstance(recon, tuple):
+                    recon = recon[0]
+
+                if isinstance(loss_fn, ClinicalLoss):
+                    losses = loss_fn(recon, data, mask)
+                else:
+                    loss = loss_fn(recon, data)
+                    losses = {'total': loss}
+
+            # Update running losses
+            for loss_name, loss_value in losses.items():
+                if loss_name not in running_losses:
+                    running_losses[loss_name] = 0.0
+                running_losses[loss_name] += loss_value.item()
+
+    # Average losses
+    avg_losses = {k: v / len(data_loader) for k, v in running_losses.items()}
+
+    return avg_losses
+
+
 def train(config):
     """
-    Train the model.
-
-    Args:
-        config (dict): Configuration
-
-    Returns:
-        tuple: (model, validation_loss)
+    Train the model with enhanced clinical metrics and logging.
     """
     # Set device
     device = torch.device(f"cuda:{config['training']['gpu_id']}" if torch.cuda.is_available() else "cpu")
@@ -627,6 +622,12 @@ def train(config):
     model = get_model(config).to(device)
     print(f"Model: {config['model']['type']}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
+    # Initialize loss function
+    if config.get('loss_function', {}).get('type', 'mse') != 'mse':
+        loss_fn = ClinicalLoss(config)
+    else:
+        loss_fn = nn.MSELoss()
 
     # Create optimizer and scheduler
     optimizer = create_optimizer(model, config)
@@ -657,14 +658,57 @@ def train(config):
     for epoch in range(config['hyperparameters']['epochs']):
         print(f"\nEpoch {epoch + 1}/{config['hyperparameters']['epochs']}")
 
-        # Train
-        train_loss = train_epoch(model, data_loaders['train'], optimizer, device, config)
+        # Train with clinical loss if configured
+        if isinstance(loss_fn, ClinicalLoss):
+            train_losses = train_epoch_with_clinical_loss(
+                model, data_loaders['train'], optimizer, loss_fn, device, config, epoch
+            )
+        else:
+            # Traditional training
+            train_loss = train_epoch(model, data_loaders['train'], optimizer, device, config)
+            train_losses = {'total': train_loss}
 
-        # Validate
-        val_loss = validate(model, data_loaders['val'], device, config)
+        # Validate with clinical loss if configured
+        if isinstance(loss_fn, ClinicalLoss):
+            val_losses = validate_with_clinical_loss(
+                model, data_loaders['val'], loss_fn, device, config
+            )
+        else:
+            # Traditional validation
+            val_loss = validate(model, data_loaders['val'], device, config)
+            val_losses = {'total': val_loss}
+
+        # Use total loss for tracking
+        train_loss = train_losses.get('total', 0.0)
+        val_loss = val_losses.get('total', 0.0)
 
         # Print progress
         print(f"Train Loss: {train_loss:.6f}, Validation Loss: {val_loss:.6f}")
+
+        # Log all losses to wandb
+        if config['wandb']['use_wandb']:
+            log_dict = {
+                'epoch': epoch + 1,
+                'learning_rate': optimizer.param_groups[0]['lr']
+            }
+
+            # Add all training losses
+            for loss_name, loss_value in train_losses.items():
+                log_dict[f'train/{loss_name}'] = loss_value
+
+            # Add all validation losses
+            for loss_name, loss_value in val_losses.items():
+                log_dict[f'val/{loss_name}'] = loss_value
+
+            wandb.log(log_dict)
+
+            # Log high dose slice
+            log_high_dose_slice(model, data_loaders['val'], epoch + 1, device, config)
+
+            # Log full reconstructions
+            if config.get('logging', {}).get('log_reconstructions', True):
+                if (epoch + 1) % config.get('logging', {}).get('reconstruction_frequency', 10) == 0:
+                    log_images(model, data_loaders['val'], epoch + 1, device, config)
 
         # Update scheduler
         if scheduler:
@@ -691,15 +735,6 @@ def train(config):
                 print(f"Early stopping triggered after {epoch + 1} epochs")
                 break
 
-        # Log to wandb if enabled
-        if config['wandb']['use_wandb']:
-            wandb.log({
-                'epoch': epoch + 1,
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'learning_rate': optimizer.param_groups[0]['lr']
-            })
-
     # Close wandb if enabled
     if config['wandb']['use_wandb']:
         wandb.finish()
@@ -710,12 +745,6 @@ def train(config):
 def hyperparameter_optimization(config):
     """
     Run hyperparameter optimization.
-
-    Args:
-        config (dict): Configuration
-
-    Returns:
-        dict: Best hyperparameters
     """
     print("Starting hyperparameter optimization...")
 

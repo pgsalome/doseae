@@ -8,6 +8,43 @@ from torch import nn
 from ..models import get_model
 
 
+def find_high_dose_slice(dose_volume):
+    """
+    Find the slice with the highest dose area.
+
+    Args:
+        dose_volume: Dose tensor of any dimensionality
+
+    Returns:
+        Index of the slice with highest dose
+    """
+    import torch
+
+    # Handle different tensor types
+    if isinstance(dose_volume, np.ndarray):
+        dose_volume = torch.from_numpy(dose_volume)
+
+    # Handle different dimensions
+    if dose_volume.dim() == 5:  # [B, C, D, H, W]
+        dose_volume = dose_volume[0, 0]
+    elif dose_volume.dim() == 4:  # [B, D, H, W] or [C, D, H, W]
+        if dose_volume.shape[0] == 1:  # [C, D, H, W] with C=1
+            dose_volume = dose_volume[0]
+        else:  # [B, D, H, W]
+            dose_volume = dose_volume[0]
+    elif dose_volume.dim() == 3:  # [D, H, W]
+        pass
+    else:
+        # 2D data, return 0
+        return 0
+
+    # Sum dose in each slice
+    slice_doses = torch.sum(dose_volume, dim=(1, 2))
+
+    # Find slice with maximum dose
+    max_slice_idx = torch.argmax(slice_doses).item()
+
+    return max_slice_idx
 def load_trained_model(model_path, model_type, config=None):
     """
     Load a trained model from a checkpoint file.

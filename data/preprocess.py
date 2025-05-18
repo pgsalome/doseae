@@ -13,6 +13,8 @@ import logging
 import random
 import matplotlib.pyplot as plt
 import glob
+import math
+import sys
 
 # Import your existing functionality
 from utils.patch_extraction import extract_informative_patches_2d, extract_patches_3d
@@ -598,47 +600,57 @@ def extract_patches_from_data(volume_data, config):
                 random_state=random_state
             )
 
-            # Process each extracted patch
-            for i, patch in enumerate(patches_arr):
-                # Create a mask patch (assuming the patch is already masked)
-                mask_patch = np.ones_like(patch)
+            # Process each extracted patch in smaller batches to reduce memory usage
+            batch_size = 20  # Process patches in batches of 20
+            for batch_idx in range(0, len(patches_arr), batch_size):
+                batch_end = min(batch_idx + batch_size, len(patches_arr))
 
-                # Keep a copy of the original patch
-                original_patch = patch.copy()
+                for i, patch in enumerate(patches_arr[batch_idx:batch_end]):
+                    # Create a mask patch (assuming the patch is already masked)
+                    mask_patch = np.ones_like(patch)
 
-                if should_resize:
-                    # Only resample if resize_to is specified
-                    try:
-                        resampled_patch = resample_patch(
-                            patch,
-                            voxel_patch_size,
-                            target_spacing,
-                            resize_to
-                        )
-                    except Exception as e:
-                        logger.error(f"Error resampling patch {i} for patient {volume_data['patient_id']}: {e}")
-                        continue  # Skip this patch and continue with the next one
-                else:
-                    # Keep the original patch without resampling
-                    resampled_patch = patch
+                    # Keep a copy of the original patch
+                    original_patch = patch.copy()
 
-                # Create the patch dictionary
-                patch_dict = {
-                    "data": resampled_patch,  # Either resampled or original patch
-                    "mask": mask_patch if not should_resize else np.ones_like(resampled_patch),
-                    "patient_id": volume_data["patient_id"],
-                    "mask_type": volume_data["mask_type"],
-                    "zc_value": np.count_nonzero(patch),
-                    "is_2d": False,
-                    "original_spacing": spacing,
-                    "normalize_method": volume_data.get("normalize_method", "none"),
-                    "patch_size_mm": patch_size if patch_unit_type == 'mm' else None,
-                    "patch_size_voxels": voxel_patch_size,
-                    "target_spacing": target_spacing if should_resize else spacing,
-                    "resized": should_resize,
-                    "final_shape": resampled_patch.shape  # Store the final shape
-                }
-                patches.append(patch_dict)
+                    if should_resize:
+                        # Only resample if resize_to is specified
+                        try:
+                            resampled_patch = resample_patch(
+                                patch,
+                                voxel_patch_size,
+                                target_spacing,
+                                resize_to
+                            )
+                        except Exception as e:
+                            logger.error(f"Error resampling patch {i} for patient {volume_data['patient_id']}: {e}")
+                            continue  # Skip this patch and continue with the next one
+                    else:
+                        # Keep the original patch without resampling
+                        resampled_patch = patch
+
+                    # Create the patch dictionary
+                    patch_dict = {
+                        "data": resampled_patch,  # Either resampled or original patch
+                        "mask": mask_patch if not should_resize else np.ones_like(resampled_patch),
+                        "patient_id": volume_data["patient_id"],
+                        "mask_type": volume_data["mask_type"],
+                        "zc_value": np.count_nonzero(patch),
+                        "is_2d": False,
+                        "original_spacing": spacing,
+                        "normalize_method": volume_data.get("normalize_method", "none"),
+                        "patch_size_mm": patch_size if patch_unit_type == 'mm' else None,
+                        "patch_size_voxels": voxel_patch_size,
+                        "target_spacing": target_spacing if should_resize else spacing,
+                        "resized": should_resize,
+                        "final_shape": resampled_patch.shape  # Store the final shape
+                    }
+                    patches.append(patch_dict)
+
+                # Force garbage collection after each batch
+                original_patch = None
+                patch = None
+                import gc
+                gc.collect()
 
         except Exception as e:
             logger.error(f"Error extracting patches from volume for patient {volume_data['patient_id']}: {e}")
@@ -957,6 +969,93 @@ def visualize_samples(dataset, output_dir, num_samples=2):
     logger.info(f"Sample visualizations saved to {viz_dir}")
 
 
+def combine_chunks_in_batches(group_files, combined_dataset_path, batch_size=1000):
+    """
+    Combine chunk files into a single list, but process in batches to avoid memory issues.
+
+    Args:
+        group_files (list): List of chunk file paths
+        combined_dataset_path (str): Path to save the combined dataset
+        batch_size (int): Number of items to write at once
+    """
+    # Count total items
+    total_items = 0
+    for file_path in group_files:
+        try:
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+            total_items += len(data)
+        except Exception as e:
+            logger.error(f"Error counting items in {file_path}: {e}")
+
+    logger.info(f"Total items to combine: {total_items}")
+
+    # Create an empty list and save it to establish the file
+    with open(combined_dataset_path, 'wb') as f:
+        pickle.dump([], f)
+
+    # Use tmpfile to avoid corruption
+    current_count = 0
+    current_list = []
+
+    for file_path in tqdm(group_files, desc="Combining chunks"):
+        try:
+            with open(file_path, 'rb') as f:
+                chunk_data = pickle.load(f)
+
+            # Add items to current list
+            current_list.extend(chunk_data)
+            current_count += len(chunk_data)
+
+            # Check if we should write a batch
+            if len(current_list) >= batch_size:
+                # Read current data
+                with open(combined_dataset_path, 'rb') as f:
+                    try:
+                        combined_data = pickle.load(f)
+                    except:
+                        combined_data = []
+
+                # Append batch
+                combined_data.extend(current_list)
+
+                # Write updated data
+                with open(combined_dataset_path, 'wb') as f:
+                    pickle.dump(combined_data, f)
+
+                logger.info(f"Written {len(combined_data)} items so far")
+
+                # Clear current list
+                current_list = []
+
+                # Force garbage collection
+                combined_data = None
+                chunk_data = None
+                import gc
+                gc.collect()
+
+        except Exception as e:
+            logger.error(f"Error processing {file_path}: {e}")
+
+    # Write any remaining items
+    if current_list:
+        # Read current data
+        with open(combined_dataset_path, 'rb') as f:
+            try:
+                combined_data = pickle.load(f)
+            except:
+                combined_data = []
+
+        # Append remaining items
+        combined_data.extend(current_list)
+
+        # Write updated data
+        with open(combined_dataset_path, 'wb') as f:
+            pickle.dump(combined_data, f)
+
+        logger.info(f"Final dataset contains {len(combined_data)} items")
+
+
 def create_dataset(config):
     """
     Create dataset from patient folders containing dose distribution images and masks.
@@ -995,6 +1094,10 @@ def create_dataset(config):
     patients_dir = output_dir / "patients"
     patients_dir.mkdir(exist_ok=True, parents=True)
 
+    # Create directory for intermediate group files
+    groups_dir = output_dir / "groups"
+    groups_dir.mkdir(exist_ok=True, parents=True)
+
     # Check if we're in test mode
     test_mode = config.get('dataset', {}).get('test_mode', False) or config.get('preprocessing', {}).get('test_mode',
                                                                                                          False)
@@ -1015,6 +1118,10 @@ def create_dataset(config):
             # Update patients directory
             patients_dir = output_dir / "patients"
             patients_dir.mkdir(exist_ok=True, parents=True)
+
+            # Update groups directory
+            groups_dir = output_dir / "groups"
+            groups_dir.mkdir(exist_ok=True, parents=True)
 
     logger.info(f"Processing {len(patient_folders)} patient folders")
     pipeline_steps.append("3. Apply mask to isolate dose distributions in regions of interest")
@@ -1048,105 +1155,150 @@ def create_dataset(config):
         format_type = "volumes"
         pipeline_steps.append("5. Process full volumes")
 
-    # List to keep track of patient files
-    patient_files = []
+    # Define number of groups - increase the number to reduce memory usage per group
+    num_groups = 20
+    pipeline_steps.append(f"6. Organize data into {num_groups} intermediate groups to manage memory")
 
-    # Process each patient folder
-    for folder_idx, folder in enumerate(tqdm(patient_folders, desc="Processing patients")):
-        patient_id = folder.name
+    # Divide patient folders into groups
+    patient_groups = []
+    group_size = math.ceil(len(patient_folders) / num_groups)
 
-        # Process the patient folder to get masked data
-        processed_items = process_patient_folder(str(folder), config)
+    for i in range(0, len(patient_folders), group_size):
+        group = patient_folders[i:i + group_size]
+        patient_groups.append(group)
 
-        # Skip if no items were processed
-        if not processed_items:
-            continue
+    logger.info(f"Divided {len(patient_folders)} patients into {len(patient_groups)} groups")
 
-        # Extract patches or slices as needed
-        extracted_data = []
-        if patch_extraction:
-            for item in processed_items:
-                patches = extract_patches_from_data(item, config)
-                extracted_data.extend(patches)
-                total_items += len(patches)
-        elif extract_slices_enabled:
-            for item in processed_items:
-                slices = extract_slices(item, config)
-                extracted_data.extend(slices)
-                total_items += len(slices)
-        else:
-            extracted_data = processed_items
-            total_items += len(processed_items)
+    # List to keep track of group files
+    group_files = []
 
-        # Save patient data if we have any
-        if extracted_data:
-            patient_file = patients_dir / f"patient_{patient_id}.pkl"
-            with open(patient_file, "wb") as f:
-                pickle.dump(extracted_data, f)
-            patient_files.append(str(patient_file))
+    # Process each group of patient folders
+    for group_idx, group in enumerate(patient_groups):
+        logger.info(f"Processing group {group_idx + 1} of {len(patient_groups)} ({len(group)} patients)")
 
-            # Print what we extracted
+        # List to track patient files in this group
+        group_patient_files = []
+        group_data = []
+
+        # Process each patient folder in the group
+        for folder_idx, folder in enumerate(tqdm(group, desc=f"Processing patients in group {group_idx + 1}")):
+            patient_id = folder.name
+
+            # Process the patient folder to get masked data
+            processed_items = process_patient_folder(str(folder), config)
+
+            # Skip if no items were processed
+            if not processed_items:
+                continue
+
+            # Extract patches or slices as needed
+            extracted_data = []
             if patch_extraction:
-                logger.info(f"Patient {patient_id}: Extracted {len(extracted_data)} patches")
+                for item in processed_items:
+                    patches = extract_patches_from_data(item, config)
+                    extracted_data.extend(patches)
+                    total_items += len(patches)
             elif extract_slices_enabled:
-                logger.info(f"Patient {patient_id}: Extracted {len(extracted_data)} slices")
+                for item in processed_items:
+                    slices = extract_slices(item, config)
+                    extracted_data.extend(slices)
+                    total_items += len(slices)
             else:
-                logger.info(f"Patient {patient_id}: Processed {len(extracted_data)} volumes")
+                extracted_data = processed_items
+                total_items += len(processed_items)
 
-        # Force garbage collection
-        import gc
-        gc.collect()
+            # Save patient data if we have any
+            if extracted_data:
+                patient_file = patients_dir / f"patient_{patient_id}.pkl"
+                with open(patient_file, "wb") as f:
+                    pickle.dump(extracted_data, f)
+                group_patient_files.append(str(patient_file))
+
+                # Add to the group data
+                group_data.extend(extracted_data)
+
+                # Print what we extracted
+                if patch_extraction:
+                    logger.info(f"Patient {patient_id}: Extracted {len(extracted_data)} patches")
+                elif extract_slices_enabled:
+                    logger.info(f"Patient {patient_id}: Extracted {len(extracted_data)} slices")
+                else:
+                    logger.info(f"Patient {patient_id}: Processed {len(extracted_data)} volumes")
+
+            # Force garbage collection
+            import gc
+            gc.collect()
+
+        # Save group data - if the group is too large, split into smaller chunks
+        if group_data:
+            # Calculate a rough estimate of items per chunk (max 5,000 items per file)
+            max_items_per_chunk = 5000
+            num_chunks = max(1, math.ceil(len(group_data) / max_items_per_chunk))
+
+            logger.info(f"Group {group_idx + 1} has {len(group_data)} items, dividing into {num_chunks} chunks")
+
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * max_items_per_chunk
+                end_idx = min((chunk_idx + 1) * max_items_per_chunk, len(group_data))
+
+                chunk_data = group_data[start_idx:end_idx]
+                chunk_file = groups_dir / f"group_{group_idx + 1}_chunk_{chunk_idx + 1}.pkl"
+
+                logger.info(f"Saving chunk {chunk_idx + 1}/{num_chunks} with {len(chunk_data)} items to {chunk_file}")
+                with open(chunk_file, "wb") as f:
+                    pickle.dump(chunk_data, f)
+                group_files.append(str(chunk_file))
+
+                # Clear chunk data to free memory
+                chunk_data = None
+
+                # Force garbage collection
+                import gc
+                gc.collect()
+
+            # Clear group data to free memory
+            group_data = []
+
+            # Force garbage collection
+            import gc
+            gc.collect()
 
     # Check if we have any data
-    if not patient_files:
+    if not group_files:
         logger.error("No data was successfully processed")
         return
 
-    logger.info(f"Successfully processed {total_items} items across {len(patient_files)} patient files")
+    logger.info(f"Successfully processed {total_items} items across {len(group_files)} chunks")
 
-    # Sample visualization from the first patient file
-    if patient_files:
+    # Sample visualization - load just a small subset from the first group
+    if group_files:
         try:
-            # Load just the first patient file for visualization
-            with open(patient_files[0], "rb") as f:
-                first_batch = pickle.load(f)
+            with open(group_files[0], "rb") as f:
+                first_batch = pickle.load(f)[:2]  # Load just 2 samples for visualization
 
             # Visualize a few samples
             if first_batch:
-                visualize_samples(first_batch[:min(2, len(first_batch))], output_dir, num_samples=2)
+                visualize_samples(first_batch, output_dir, num_samples=2)
+
+            # Clear visualization data
+            first_batch = None
+            import gc
+            gc.collect()
         except Exception as e:
             logger.error(f"Error visualizing samples: {e}")
 
-    # Now combine all into a single dataset file for the training script
-    logger.info(f"Combining all patient files into a single dataset file...")
-    combined_data = []
-
-    for patient_file in tqdm(patient_files, desc="Combining data"):
-        try:
-            with open(patient_file, "rb") as f:
-                patient_data = pickle.load(f)
-                combined_data.extend(patient_data)
-        except Exception as e:
-            logger.error(f"Error loading patient file {patient_file}: {e}")
-
-    # Print final counts and shapes
-    if combined_data:
-        logger.info(f"Combined dataset has {len(combined_data)} items")
-        logger.info(f"First item shape: {combined_data[0]['data'].shape}")
-
-    # Save the combined dataset
+    # Create the final combined dataset
     combined_dataset_path = output_dir / f"{format_type}_dataset.pkl"
-    with open(combined_dataset_path, "wb") as f:
-        pickle.dump(combined_data, f)
 
-    logger.info(f"Created combined dataset with {len(combined_data)} items at {combined_dataset_path}")
+    # Combine chunks into a single list in a memory-efficient way
+    logger.info(f"Combining chunks into a single list format compatible with create_data_loaders...")
+    combine_chunks_in_batches(group_files, combined_dataset_path, batch_size=2000)
 
     # Create metadata
     metadata = {
         "num_samples": total_items,
         "format": format_type,
-        "patient_files": patient_files,
-        "num_patients": len(patient_files),
+        "num_patients": len(patient_folders),
         "test_mode": test_mode,
         "n_test_samples": n_test_samples if test_mode else None,
         "pipeline": pipeline_steps,
@@ -1161,6 +1313,7 @@ def create_dataset(config):
     # Update config with dataset path to the combined file
     config['dataset']['data_pkl'] = str(combined_dataset_path)
     config['dataset']['data_patients_dir'] = str(patients_dir)
+    config['dataset']['data_groups_dir'] = str(groups_dir)
 
     # If in test mode, update the configuration to indicate this
     if test_mode:
@@ -1176,6 +1329,7 @@ def create_dataset(config):
     logger.info(f"Dataset processing completed successfully")
     logger.info(f"Total samples: {total_items}")
     logger.info(f"Patient files saved in: {patients_dir}")
+    logger.info(f"Group files saved in: {groups_dir}")
     logger.info(f"Combined dataset saved to: {combined_dataset_path}")
     logger.info(f"Preprocessing pipeline saved to: {pipeline_path}")
 
