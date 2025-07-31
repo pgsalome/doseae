@@ -952,28 +952,34 @@ if __name__ == "__main__":
             json.dump(failed_patients, f, indent=4)
         logger.info(f"List of failed patients saved to {failed_patients_path}")
 
-    # --- Final Step: Combine all individual patient pickle files into one ---
+    # --- Final Step: Combine all individual patient pickle files into one (MEMORY EFFICIENT) ---
     logger.info("Combining all individual patient patch files into a single dataset...")
     all_patch_files = glob.glob(join(output_dir, "subject_*", "*_patches.pkl"))
     combined_dataset_path = join(output_dir, "patches_dataset_final.pkl")
 
-    all_patches_data = []
-    for f in tqdm(all_patch_files, desc="Combining Files"):
-        try:
-            with open(f, 'rb') as pkl_file:
-                patient_data = pickle.load(pkl_file)
-                all_patches_data.extend(patient_data)
-        except Exception as e:
-            logger.error(f"Could not load or read {f}: {e}")
+    # If the combined file already exists, remove it to start fresh
+    if os.path.exists(combined_dataset_path):
+        os.remove(combined_dataset_path)
+    
+    total_patches_combined = 0
+    # Open the final file in append-binary mode ('ab')
+    with open(combined_dataset_path, 'ab') as final_file:
+        for f_path in tqdm(all_patch_files, desc="Combining Files"):
+            try:
+                # Open one patient's pickle file
+                with open(f_path, 'rb') as pkl_file:
+                    patient_data = pickle.load(pkl_file)
+                    # Dump each item from the patient's data into the final file
+                    for patch in patient_data:
+                        pickle.dump(patch, final_file)
+                    total_patches_combined += len(patient_data)
+            except Exception as e:
+                logger.error(f"Could not load or process {f_path}: {e}")
 
-    if all_patches_data:
-        try:
-            with open(combined_dataset_path, 'wb') as f:
-                pickle.dump(all_patches_data, f)
-            logger.info(
-                f"Successfully combined {len(all_patches_data)} patches from {len(all_patch_files)} patients into {combined_dataset_path}")
-        except Exception as e:
-            logger.error(f"Failed to write final combined dataset: {e}")
+    if total_patches_combined > 0:
+        logger.info(
+            f"Successfully combined {total_patches_combined} patches from {len(all_patch_files)} patients into {combined_dataset_path}"
+        )
     else:
         logger.warning("No patch data found to combine.")
 
