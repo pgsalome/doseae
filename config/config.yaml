@@ -1,6 +1,6 @@
 dataset:
-  data_dir: '/data/pgsal/data/TCIA_Subjects1/NSCLC-Cetuximab_wdir1/workflows_output'
-  data_pkl: '/data/pgsal/data/TCIA_Subjects1/NSCLC-Cetuximab_wdir1/patches_dataset.pkl'
+  data_dir: '/data/pgsal/NSCLC-Cetuximab'
+  data_pkl: '/data/pgsal/NSCLC-Cetuximab/patches_dataset.pkl'
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -20,7 +20,7 @@ preprocessing:
   clinical_norm_method: "95percentile"  # First normalize to 95th percentile (clinically meaningful)
   dl_norm_method: "minmax"  # Then normalize for neural network training (0-1 range)
   percentile_norm: 95  # Percentile for normalization (0-100)
-  voxel_spacing: [1, 1, 1]  # Physical spacing in mm (isotropic or anisotropic)
+  voxel_spacing: [0.5, 0.5, 0.5]  # Physical spacing in mm - CHANGED TO 0.5mm to match pre-trained encoder
   resize_to: [64, 64, 64]  # Target size for resampling
   unit_type: "voxels"  # "voxels" or "mm" - how size values are interpreted
   extract_slices: false  # Whether to extract 2D slices from 3D volumes
@@ -34,6 +34,9 @@ preprocessing:
   file_format: "nrrd"  # Options: "nifti" or "nrrd"
   nifti_extension: ".nii.gz"  # Used when file_format is "nifti"
   nrrd_extension: ".nrrd"     # Used when file_format is "nrrd"
+  # NEW: Interpolation settings for different data types
+  ct_interpolation: "linear"         # Linear interpolation for CT (smooth anatomy)
+  dose_interpolation: "nearest"      # Nearest neighbor for dose (preserve values)
 
 # Settings for transforms during training (conceptually separate but not used by preprocessing script)
 transforms:
@@ -47,14 +50,17 @@ transforms:
 patch_extraction:
   enable: true  # Set to true to extract patches
   patch_dimension: "3D"  # "2D" or "3D" - dimensionality of patches to extract
-  patch_size: [50, 50, 50]  # Size of patches to extract (in voxels or mm)
-  patch_unit_type: "mm"  # "voxels" or "mm" - how patch_size values are interpreted
+  patch_size_voxels: [50, 50, 50]
+  patch_unit_type: "voxels"  # CORRECTED: Now using voxels, not mm
   threshold: 0.01  # Standard deviation threshold for informative patches
   max_patches_per_slice: 100  # Maximum number of patches to extract per slice
   max_patches_per_volume: 500  # Maximum number of patches to extract per volume
   random_state: 42  # Random seed for patch extraction
-  min_lung_percentage: 0.25  # Minimum percentage of lung voxels required in a patch
+  min_lung_percentage: 0.70  # UPDATED: Minimum 70% lung coverage (from cOOpD paper)
   min_dose_percentage: 0.01  # Minimum percentage of non-zero dose voxels required in a patch
+  # NEW: Settings for spatial correspondence
+  extract_matched_pairs: true   # Extract CT-dose pairs from same spatial locations
+  overlap_percentage: 50        # Patch overlap percentage (50% = 50% overlap like cOOpD)
 
 model:
   type: 'vae'  # Options: 'vae', 'resnet_ae', 'unet_ae', 'conv_autoencoder', 'mlp_autoencoder', 'unet'
@@ -91,7 +97,7 @@ clinical_metrics:
   dose_threshold_cutoff: 10  # Lower dose cutoff (% of max dose)
   calculate_dvh: true
   dvh_num_bins: 1000
-  spacing: [2.0, 2.0, 2.0]  # Voxel spacing in mm
+  spacing: [0.5, 0.5, 0.5]  # UPDATED: Voxel spacing in mm to match preprocessing
 
 # Loss function configuration
 loss_function:
@@ -113,13 +119,13 @@ logging:
   reconstruction_frequency: 10  # Log full reconstructions every N epochs
   num_samples_to_log: 4
   visualization_interval: 10  # Interval for logging image visualizations
-  random_patches_per_lobe: 10  # Number of random patches to visualize per lung lobe (new parameter)
+  random_patches_per_lobe: 5  # REDUCED: Number of random patches to visualize per lung lobe (reduced due to higher resolution)
 
 wandb:
   use_wandb: true
-  project_name: 'dose_distribution_autoencoder_patches'
+  project_name: 'dose_distribution_autoencoder_05mm'  # UPDATED: Project name to reflect resolution
   entity: 'pgsalome'
-  name: 'doseae_patches'  # Run name (will be auto-generated if null)
+  name: 'doseae_05mm_nearest'  # UPDATED: Run name to reflect changes
 
 optuna:
   use_optuna: false
@@ -130,6 +136,13 @@ optuna:
   pruner: 'median'  # Options: 'median', 'none'
 
 output:
-  model_dir: '/data/pgsal/data/TCIA_Subjects1/NSCLC-Cetuximab_wdir1/models'
-  log_dir: '/data/pgsal/data/TCIA_Subjects1/NSCLC-Cetuximab_wdir1/results_patch2/logs'
-  results_dir: '/data/pgsal/data/TCIA_Subjects1/NSCLC-Cetuximab_wdir1/results_patch2'
+  model_dir: '/data/pgsal/NSCLC-Cetuximab_models'
+  log_dir: '/data/pgsal/NSCLC-Cetuximab_results_05mm/logs'  # UPDATED: Directory name
+  results_dir: '/data/pgsal/NSCLC-Cetuximab_results_05mm'    # UPDATED: Directory name
+
+# NEW: Settings for compatibility with pre-trained encoders
+pretrained_encoder:
+  use_pretrained_ct_encoder: false  # Set to true when using pre-trained CT encoder
+  ct_encoder_path: null             # Path to pre-trained CT encoder weights
+  freeze_ct_encoder: true           # Whether to freeze CT encoder during training
+  expected_input_spacing: [0.5, 0.5, 0.5]  # Expected input spacing for pre-trained encoder
