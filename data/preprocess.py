@@ -960,7 +960,7 @@ if __name__ == "__main__":
     # If the combined file already exists, remove it to start fresh
     if os.path.exists(combined_dataset_path):
         os.remove(combined_dataset_path)
-    
+
     total_patches_combined = 0
     # Open the final file in append-binary mode ('ab')
     with open(combined_dataset_path, 'ab') as final_file:
@@ -1023,14 +1023,39 @@ if __name__ == "__main__":
     output_dir = config['output']['results_dir']
     os.makedirs(output_dir, exist_ok=True)
 
-    # Find all patient directories
-    rtdose_dirs = find_rtdose_dirs(base_dir)
+    # --- MODIFIED LOGIC TO FILTER PATIENTS ---
 
-    # Slice for batch processing
-    process_list = rtdose_dirs[args.start:args.end]
+    # 1. Find all available patient RTDOSE directories in the base directory
+    all_rtdose_dirs = find_rtdose_dirs(base_dir)
+
+    # 2. Check the config for a specific list of patients to run
+    # .get() is used to avoid errors if the keys don't exist
+    specific_patients_to_run = config.get('processing_scope', {}).get('specific_patients')
+
+    rtdose_dirs_to_process = []
+    if specific_patients_to_run:
+        logger.info(f"Found a specific list of {len(specific_patients_to_run)} patients to process in the config file.")
+        # Create a set for fast lookups
+        target_patient_set = {str(p) for p in specific_patients_to_run}
+
+        # Filter the full list of directories to keep only the ones we want
+        for rtdose_dir in all_rtdose_dirs:
+            subject_id = get_subject_id_from_path(rtdose_dir)
+            if subject_id in target_patient_set:
+                rtdose_dirs_to_process.append(rtdose_dir)
+
+        logger.info(f"Matched {len(rtdose_dirs_to_process)} of the specified patients in the data directory.")
+    else:
+        logger.info("No specific patient list found in config. The script will process all available patients.")
+        rtdose_dirs_to_process = all_rtdose_dirs
+
+    # --- END OF MODIFIED LOGIC ---
+
+    # Slice for batch processing, now using the potentially filtered list
+    process_list = rtdose_dirs_to_process[args.start:args.end]
 
     logger.info(
-        f"Starting processing run. Total patients to process: {len(process_list)} (from index {args.start} to {args.end or len(rtdose_dirs)})")
+        f"Starting processing run. Total patients to process: {len(process_list)} (from index {args.start} to {args.end or len(rtdose_dirs_to_process)})")
 
     failed_patients = []
     processed_count = 0
@@ -1049,7 +1074,6 @@ if __name__ == "__main__":
             except Exception as e:
                 logger.error(f"--- Unhandled exception for patient {subject_id}: {e} ---")
                 import traceback
-
                 logger.error(traceback.format_exc())
                 failed_patients.append({"patient_id": subject_id, "reason": str(e)})
 
@@ -1064,27 +1088,3 @@ if __name__ == "__main__":
             json.dump(failed_patients, f, indent=4)
         logger.info(f"List of failed patients saved to {failed_patients_path}")
 
-    # --- Final Step: Combine all individual patient pickle files into one ---
-    logger.info("Combining all individual patient patch files into a single dataset...")
-    all_patch_files = glob.glob(join(output_dir, "subject_*", "*_patches.pkl"))
-    combined_dataset_path = join(output_dir, "patches_dataset_final.pkl")
-
-    all_patches_data = []
-    for f in tqdm(all_patch_files, desc="Combining Files"):
-        try:
-            with open(f, 'rb') as pkl_file:
-                patient_data = pickle.load(pkl_file)
-                all_patches_data.extend(patient_data)
-        except Exception as e:
-            logger.error(f"Could not load or read {f}: {e}")
-
-    if all_patches_data:
-        try:
-            with open(combined_dataset_path, 'wb') as f:
-                pickle.dump(all_patches_data, f)
-            logger.info(
-                f"Successfully combined {len(all_patches_data)} patches from {len(all_patch_files)} patients into {combined_dataset_path}")
-        except Exception as e:
-            logger.error(f"Failed to write final combined dataset: {e}")
-    else:
-        logger.warning("No patch data found to combine.")
