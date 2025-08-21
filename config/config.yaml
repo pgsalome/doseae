@@ -1,6 +1,6 @@
 dataset:
-  data_dir: '/data/pgsal/ldc_new3'
-  data_pkl: '/data/pgsal/ldc_new3/patches_dataset.pkl'
+  data_dir: '/media/e210/HD1/NSCLC-SBRT/all_pids_PsCurated'
+  data_pkl: '/media/e210/HD1/NSCLC-SBRT_doseae'
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -136,9 +136,9 @@ optuna:
   pruner: 'median'  # Options: 'median', 'none'
 
 output:
-  model_dir: '/data/pgsal/ldc_doseae'
-  log_dir: '/data/pgsal/ldc_doseae/logs'  # UPDATED: Directory name
-  results_dir: '/data/pgsal/ldc_doseae'    # UPDATED: Directory name
+  model_dir: '/media/e210/HD1/NSCLC-SBRT_doseae'
+  log_dir: '/media/e210/HD1/NSCLC-SBRT_doseae/logs'  # UPDATED: Directory name
+  results_dir: '/media/e210/HD1/NSCLC-SBRT_doseae'    # UPDATED: Directory name
 
 # NEW: Settings for compatibility with pre-trained encoders
 pretrained_encoder:

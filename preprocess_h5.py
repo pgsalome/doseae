@@ -26,12 +26,10 @@ except ImportError:
     psutil = None
 
 # Assuming pycurtv2 is in the environment. If not, this will raise an ImportError.
-try:
-    from pycurtv2.converters.dicom import DicomConverter
-    PYCURT_AVAILABLE = True
-except ImportError:
-    PYCURT_AVAILABLE = False
-    DicomConverter = None
+
+from pycurtv2.converters.dicom import DicomConverter
+
+
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -173,9 +171,7 @@ def check_memory(mem_threshold_gb=2.0, swap_threshold_pct=80.0):
 
 def run_dicom_conversion(dicom_dir, convert_to='nifti_gz'):
     """Runs DICOM conversion for a given directory."""
-    if not PYCURT_AVAILABLE:
-        logger.error("pycurtv2 is not available, cannot perform DICOM conversion")
-        return False
+
 
     logger.info(f"Converting DICOMs in {dicom_dir} to {convert_to}...")
     converter = DicomConverter(toConvert=dicom_dir, convert_to=convert_to)
@@ -691,6 +687,7 @@ def find_rtdose_dirs(base_dir):
     all_dirs = []
     for pattern in patterns:
         found_dirs = [d for d in glob.glob(pattern) if os.path.isdir(d)]
+        found_dirs = [d for d in found_dirs if 'RTLUNG' in d]
 
         # If the rename flag is set, process and rename the parent directories
         if rename:
@@ -826,15 +823,13 @@ if __name__ == "__main__":
 
     # Determine format to use
     use_pycurt_format = args.pycurt_format
-    if use_pycurt_format and not PYCURT_AVAILABLE:
-        logger.error("pycurt format requested but pycurtv2 is not available. Please install pycurtv2 or use simplified format.")
-        exit(1)
+
 
     logger.info(f"Using {'pycurt' if use_pycurt_format else 'simplified'} format for processing")
 
     # Setup directories - use hardcoded output dir as requested
     base_dir = config['dataset']['data_dir']
-    output_dir = "/data/pgsal/ldc_doseae"  # Hardcoded output directory
+    output_dir = config['output']['results_dir']  # Hardcoded output directory
     os.makedirs(output_dir, exist_ok=True)
 
     # Load zero dose patients list
