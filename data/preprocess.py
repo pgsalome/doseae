@@ -892,6 +892,7 @@ def find_rtdose_dirs(base_dir):
     else:
         # For other PIDs, find directories that already match the desired names
         patterns = [
+            join(base_dir, "*", "*", "*", "*", "RTDOSE*-CPT", "*"),
             join(base_dir, "*", "*", "*", "*", "RTDOSE*-MPT", "*"),
             join(base_dir, "*", "*", "*", "*", "RTDOSE*-MP1", "*")
         ]
@@ -908,6 +909,7 @@ def find_rtdose_dirs(base_dir):
                 old_name = os.path.basename(parent_dir_path)
 
                 # Create the new name by replacing '-MP' followed by characters with '-MPT'
+
                 new_name = re.sub(r'-MP\w+', '-MPT', old_name)
 
                 # Start with the original path
@@ -1041,6 +1043,7 @@ if __name__ == "__main__":
 def find_rtdose_dirs(base_dir):
     """Finds all RTDOSE directories, preferring '-MPT' over '-MP1'."""
     patterns = [
+        join(base_dir, "*", "*", "*", "*", "RTDOSE*-CPT", "*"),
         join(base_dir, "*", "*", "*", "*", "RTDOSE*-MPT", "*"),
         join(base_dir, "*", "*", "*", "*", "RTDOSE*-MP1", "*")
     ]
