@@ -860,8 +860,9 @@ def process_patient(rtdose_dir, output_dir, config):
     else:
         logger.warning(f"No patches were extracted for patient {subject_id}.")
 
-    # 7. Final cleanup (same as before)
-    for f in [resampled_ct_path, resampled_dose_path, left_lung_mask_path, right_lung_mask_path, norm_masked_dose_path]:
+    # 7. Final cleanup of large intermediate files
+    for f in [resampled_ct_path, resampled_dose_path, left_lung_mask_path, right_lung_mask_path,
+              norm_masked_dose_path]:
         if f and os.path.exists(f):
             try:
                 os.remove(f)
@@ -873,22 +874,75 @@ def process_patient(rtdose_dir, output_dir, config):
 
 
 def find_rtdose_dirs(base_dir):
-    """Finds all RTDOSE directories, preferring '-MPT' over '-MP1'."""
-    patterns = [
-        join(base_dir, "*", "*", "*", "*", "RTDOSE*-MPT", "*"),
-        join(base_dir, "*", "*", "*", "*", "RTDOSE*-MP1", "*")
-    ]
+    """
+    Finds RTDOSE directories, renames special cases from '-MP*' to '-MPT',
+    and returns a unique list of final directory paths.
+    """
+    special_pids = ["0617548432","0617601841","0617795029","0617766921","0617385185","0617789552","0617698612","0617692367","0617466966","0617544655","0617744077","0617693006","0617589358","0617592801","0617673893", "0617713112","0617757588","0617544655", "0617744077","0617661400", "0617876923", "0617706363", "0617553904", "0617517268", "0617455683",
+                    "0617450775", "0617706363", "0617876923","0617661400","0617548432","0617698612","0617789552","0617385185","0617417018","0617544856"]
+    rename = False
+
+    # Check if the base directory corresponds to a special PID
+    if os.path.basename(base_dir) in special_pids:
+        # This pattern finds the target directory inside a parent named like 'RTDOSE*-MP*'
+        patterns = [
+            join(base_dir, "*", "*", "*", "*", "RTDOSE*-MP*", "RTDOSETOTALHETERO"),
+        ]
+        rename = True
+    else:
+        # For other PIDs, find directories that already match the desired names
+        patterns = [
+            join(base_dir, "*", "*", "*", "*", "RTDOSE*-MPT", "*"),
+            join(base_dir, "*", "*", "*", "*", "RTDOSE*-MP1", "*")
+        ]
+
     all_dirs = []
     for pattern in patterns:
-        # dirname gets the parent RTDOSE-* directory
         found_dirs = [d for d in glob.glob(pattern) if os.path.isdir(d)]
-        all_dirs.extend(found_dirs)
 
-    # Remove duplicates while preserving order (MPT will come first)
+        # If the rename flag is set, process and rename the parent directories
+        if rename:
+            processed_dirs = []
+            for inner_dir in found_dirs:
+                parent_dir_path = os.path.dirname(inner_dir)
+                old_name = os.path.basename(parent_dir_path)
+
+                # Create the new name by replacing '-MP' followed by characters with '-MPT'
+                new_name = re.sub(r'-MP\w+', '-MPT', old_name)
+
+                # Start with the original path
+                final_inner_dir_path = inner_dir
+
+                # Only proceed if a rename is actually needed
+                if old_name != new_name:
+                    grandparent_path = os.path.dirname(parent_dir_path)
+                    new_parent_path = os.path.join(grandparent_path, new_name)
+
+                    # --- Print the old and new paths ---
+                    print(f"--- Renaming directory ---\n  Old Path: {parent_dir_path}\n  New Path: {new_parent_path}\n")
+
+                    try:
+                        # Perform the rename
+                        os.rename(parent_dir_path, new_parent_path)
+                        # IMPORTANT: Update the path to the inner directory for the return list
+                        final_inner_dir_path = os.path.join(new_parent_path, os.path.basename(inner_dir))
+                    except OSError as e:
+                        logger.error(f"Failed to rename directory: {e}")
+
+                processed_dirs.append(final_inner_dir_path)
+
+            all_dirs.extend(processed_dirs)
+        else:
+            # If not renaming, just add the directories as found
+            all_dirs.extend(found_dirs)
+
+    # Remove duplicates while preserving order
     unique_dirs = list(dict.fromkeys(all_dirs))
-    logger.info(f"Found {len(unique_dirs)} unique RTDOSE directories to process.")
-    return unique_dirs
+    if unique_dirs:
+        logger.info(f"Found {len(unique_dirs)} unique RTDOSE directories to process.")
 
+
+    return unique_dirs
 
 # --- Main Execution ---
 
