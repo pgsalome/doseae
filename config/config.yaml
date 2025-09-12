@@ -1,6 +1,7 @@
 dataset:
-  data_dir: '/data/pgsal/ldc_new3'
-  data_pkl: '/data/pgsal/ldc_new3/patches_dataset.pkl'
+  dataset_type: 'patches'  # <-- ADD THIS: Can be 'patches' or 'images' in the future
+  data_h5: '/data/pgsal/NSCLC-Cetuximab_results_05mm/patches_dataset_efficient.h5'
+  h5_key: 'patches'        # <-- ADD THIS: The name of the dataset inside the HDF5 file
   train_ratio: 0.8
   val_ratio: 0.1
   test_ratio: 0.1
@@ -136,9 +137,9 @@ optuna:
   pruner: 'median'  # Options: 'median', 'none'
 
 output:
-  model_dir: '/data/pgsal/ldc_doseae'
-  log_dir: '/data/pgsal/ldc_doseae/logs'  # UPDATED: Directory name
-  results_dir: '/data/pgsal/ldc_doseae'    # UPDATED: Directory name
+  model_dir: '/data/pgsal/nsclc_doseae'
+  log_dir: '/data/pgsal/nsclc_doseae/logs'  # UPDATED: Directory name
+  results_dir: '/data/pgsal/nsclc_doseae'    # UPDATED: Directory name
 
 # NEW: Settings for compatibility with pre-trained encoders
 pretrained_encoder:

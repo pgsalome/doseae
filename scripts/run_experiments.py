@@ -16,7 +16,7 @@ from optuna.trial import Trial
 import wandb
 
 # Set wandb directory
-os.environ["WANDB_DIR"] = "/media/e210/HD81/Adhvaith_datasets/results/wandb"
+os.environ["WANDB_DIR"] = "/data/pgsal/wandb_doseae"
 
 
 def ensure_dir(directory):

@@ -737,73 +737,75 @@ def find_rtdose_dirs(base_dir):
 
 
 def combine_hdf5_files(output_dir):
-    """Combine all individual HDF5 files into one final dataset."""
-    logger.info("Combining all individual patient HDF5 files into a single dataset...")
+    """
+    Combine all individual patch files into one final, efficient dataset.
+    This version creates a single, large, contiguous dataset for fast loading.
+    """
+    logger.info("Combining all patch files into a single, efficient HDF5 dataset...")
 
-    # Look for both .h5 and .pkl files (in case some are already converted)
     all_h5_files = list(Path(output_dir).rglob("*_patches.h5"))
-    all_pkl_files = list(Path(output_dir).rglob("*_patches.pkl"))
+    if not all_h5_files:
+        logger.warning("No individual HDF5 patch files found to combine.")
+        return
 
-    combined_dataset_path = join(output_dir, "patches_dataset_final.h5")
+    combined_dataset_path = os.path.join(output_dir, "patches_dataset_final.h5")
 
-    # Remove existing combined file
-    if os.path.exists(combined_dataset_path):
-        os.remove(combined_dataset_path)
+    # --- Step 1: Gather all patch data and metadata ---
+    all_patches_data = []
+    all_metadata = []
 
-    total_patches = 0
-    patch_counter = 0
+    for h5_file in tqdm(all_h5_files, desc="Reading individual files"):
+        try:
+            with h5py.File(h5_file, 'r') as source_f:
+                for patch_name in source_f.keys():
+                    if patch_name.startswith('patch_'):
+                        grp = source_f[patch_name]
+                        # Append the actual image data
+                        all_patches_data.append(grp['data'][:])
+                        # Append metadata
+                        all_metadata.append({
+                            'patient_id': grp.attrs['patient_id'],
+                            'lung_side': grp.attrs['lung_side'],
+                        })
+        except Exception as e:
+            logger.error(f"Could not process {h5_file}: {e}")
 
-    with h5py.File(combined_dataset_path, 'w') as combined_f:
-        # Process HDF5 files
-        for h5_file in tqdm(all_h5_files, desc="Combining HDF5 Files"):
-            try:
-                with h5py.File(h5_file, 'r') as source_f:
-                    for patch_name in source_f.keys():
-                        if patch_name.startswith('patch_'):
-                            # Copy group to combined file with new name
-                            new_name = f'patch_{patch_counter:08d}'
-                            source_f.copy(patch_name, combined_f, name=new_name)
-                            patch_counter += 1
-                            total_patches += 1
+    if not all_patches_data:
+        logger.error("No valid patch data was collected. Aborting combine.")
+        return
 
-            except Exception as e:
-                logger.error(f"Could not process {h5_file}: {e}")
+    # --- Step 2: Write to a new, combined HDF5 file ---
+    total_patches = len(all_patches_data)
+    patch_shape = all_patches_data[0].shape
 
-        # Process remaining pickle files (if any)
-        for pkl_file in tqdm(all_pkl_files, desc="Converting remaining pickle files"):
-            try:
-                with open(pkl_file, 'rb') as f:
-                    pickle_data = pickle.load(f)
+    logger.info(f"Collected {total_patches} patches. Writing to final dataset...")
 
-                # Convert pickle data to HDF5 format in the combined file
-                for item in pickle_data:
-                    group_name = f'patch_{patch_counter:08d}'
-                    grp = combined_f.create_group(group_name)
+    with h5py.File(combined_dataset_path, 'w') as f:
+        # Create a single, large dataset for all patch images
+        # This is the most efficient way to store and read this data.
+        patch_ds = f.create_dataset(
+            'patches',
+            shape=(total_patches, *patch_shape),
+            dtype=np.float32,
+            chunks=(1, *patch_shape),  # Chunk by individual patch for efficient reading
+            compression='gzip'
+        )
 
-                    grp.create_dataset('data',
-                                       data=item['data'],
-                                       compression='gzip',
-                                       compression_opts=9,
-                                       dtype=np.float32)
+        # Create datasets for metadata
+        # H5py requires string data to be stored as a special type
+        string_dt = h5py.special_dtype(vlen=str)
+        patient_id_ds = f.create_dataset('patient_ids', (total_patches,), dtype=string_dt)
+        lung_side_ds = f.create_dataset('lung_sides', (total_patches,), dtype=string_dt)
 
-                    grp.attrs['patient_id'] = item['patient_id']
-                    grp.attrs['lung_side'] = item['lung_side']
-                    grp.attrs['final_shape'] = item['final_shape']
+        # Write data in a memory-efficient way
+        for i, (patch_data, meta) in enumerate(tqdm(zip(all_patches_data, all_metadata), total=total_patches, desc="Writing combined file")):
+            patch_ds[i] = patch_data
+            patient_id_ds[i] = meta['patient_id']
+            lung_side_ds[i] = meta['lung_side']
 
-                    patch_counter += 1
-                    total_patches += 1
-
-            except Exception as e:
-                logger.error(f"Could not process {pkl_file}: {e}")
-
-    if total_patches > 0:
-        logger.info(f"Successfully combined {total_patches} patches into {combined_dataset_path}")
-
-        # Report file size
-        file_size_gb = Path(combined_dataset_path).stat().st_size / (1024**3)
-        logger.info(f"Combined dataset size: {file_size_gb:.2f} GB")
-    else:
-        logger.warning("No patch data found to combine.")
+    file_size_gb = Path(combined_dataset_path).stat().st_size / (1024**3)
+    logger.info(f"Successfully combined {total_patches} patches into {combined_dataset_path}")
+    logger.info(f"Final dataset size: {file_size_gb:.2f} GB")
 
 
 # --- Main Execution ---
