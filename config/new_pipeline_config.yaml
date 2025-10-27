@@ -1,0 +1,34 @@
+dataset:
+  entity: lung
+  dataset_type: 'patches'  # Script overrides per run
+
+lung:
+  patch_size: 50
+  overlap_percentage: 20
+  patch_workers: 1
+  dose_threshold: 0.1
+  max_patches_per_lobe: 400    # Safety cap to avoid excessive per-lobe caches
+
+preprocessing:
+  voxel_spacing: [0.5, 0.5, 0.5]
+  resize_to: [128, 128, 128]
+  ct_preprocessing:
+    method: "lung_window"
+    window_center: -600
+    window_width: 1500
+    clip_range: [-1500, 300]
+
+output:
+  cache_dir: "/data/pgsal/NSCLC-Cetuximab_AE_cache"
+
+segmentation:
+  device: "gpu:0,1,2"
+  max_concurrent: 1       
+  roi_subset:
+    - lung_upper_lobe_left
+    - lung_lower_lobe_left
+    - lung_upper_lobe_right
+    - lung_middle_lobe_right
+    - lung_lower_lobe_right
+    - aorta
+    - trachea

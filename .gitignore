@@ -1,5 +1,277 @@
-.venvs
-data
-/config/
-/results/
-models
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+.venvs/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# PyCharm
+.idea/
+*.iml
+inspectionProfiles/
+misc.xml
+modules.xml
+vcs.xml
+
+# VS Code
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+ENV/
+env/
+venv/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# Data files - ignore large data files but keep structure and config files
+data/*.h5
+data/*.hdf5
+data/*.pkl
+data/*.pkl.gz
+data/*.npy
+data/*.npz
+data/*.nrrd
+data/*.nii
+data/*.nii.gz
+data/*.dcm
+data/*.dicom
+data/processed_*/
+data/cache/
+data/temp/
+data/tmp/
+data/raw/
+data/interim/
+data/external/
+
+# Large data files anywhere
+*.h5
+*.hdf5
+*.pkl
+*.pkl.gz
+*.npy
+*.npz
+*.nrrd
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+
+# Model checkpoints and outputs
+models/
+checkpoints/
+outputs/
+results/
+runs/
+logs/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Wandb
+wandb/
+
+# TensorBoard
+tensorboard_logs/
+tb_logs/
+
+# MLflow
+mlruns/
+
+# Neptune
+.neptune/
+
+# Weights & Biases
+wandb/
+
+# Hydra
+.hydra/
+outputs/
+
+# Config files (if they contain sensitive data)
+# /config/
+
+# Preprocessing outputs
+preprocessing_old/
+processed_data/
+cache/
+temp/
+tmp/
+
+# Old/legacy files
+convert_hdf5.py
+preprocess_h5.py
+convert_combinedh5_toh5.py
+extract_patches.py
+reorganize_dataset.py
+
+# Large data files
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+*.orig
+
+# Logs
+*.log
+logs/
+pickle_to_hdf5_conversion.log
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+tmp.py
+tmp1.py
+ff.py
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Medical imaging specific
+*.mhd
+*.raw
+*.mha
+*.mha.gz
+*.mhd.gz
+
+# Specific to this project - keep these important config files
+# ct_dose_file_mapping.json  # Keep this - it's important config
+# full_splits_auto.json      # Keep this - it's important config  
+# sample_single_patient_splits.json  # Keep this - it's important config
+
+# Validation and testing outputs
+validation_results/
+test_results/
+patch_validation_*.json
+
+# Test files and temporary scripts
+tests/
+run_experiments.py
+train_three_experiments.py
+validate_patches.py
+
+# Core dumps
+core
+core.*
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Lock files
+*.lock
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Profiling
+.prof

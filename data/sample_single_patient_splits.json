@@ -1,0 +1,12 @@
+{
+  "train": [
+    {
+      "patient_id": "0617697905",
+      "ct_path": "/data/pgsal/NSCLC-Cetuximab/0617697905/20000909/TRA/NS/CT-DER-MP1/CTSFROMRTOGCONVERSION_PN_8476432.nrrd",
+      "dose_path": "/data/pgsal/NSCLC-Cetuximab/0617697905/20000909/TRA/NS/RTDOSE-PLANf16T-PHY-MPT/RTDOSEFX1HETERO_PN_87474331_ct.nrrd",
+      "prescribed_dose": null
+    }
+  ],
+  "val": [],
+  "test": []
+}

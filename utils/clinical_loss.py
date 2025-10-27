@@ -19,14 +19,11 @@ class ClinicalLoss(nn.Module):
         # Initialize clinical metrics calculator
         self.metrics_calculator = ClinicalMetricsCalculator(config)
 
-        # Counter for gamma calculation frequency
-        self.batch_counter = 0
-
         # MSE loss
         self.mse_loss = nn.MSELoss()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                mask: Optional[torch.Tensor] = None, epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
         """
         Calculate loss with clinical metrics.
 
@@ -34,6 +31,7 @@ class ClinicalLoss(nn.Module):
             pred: Predicted dose distribution [B, C, D, H, W] or [B, C, H, W]
             target: Target dose distribution
             mask: Optional mask tensor
+            epoch: Current epoch number (for epoch-based frequency calculation)
 
         Returns:
             Dictionary with loss components and total loss
@@ -44,11 +42,14 @@ class ClinicalLoss(nn.Module):
         if self.loss_type in ['mse', 'combined', 'clinical']:
             losses['mse'] = self.mse_loss(pred, target)
 
-        # Clinical metrics (calculated based on frequency)
-        self.batch_counter += 1
-        calculate_clinical = (self.batch_counter % self.gamma_freq == 0)
+        # Clinical metrics (calculated based on epoch frequency)
+        calculate_clinical = False
+        if epoch is not None and self.loss_type in ['gamma', 'combined', 'clinical']:
+            # epoch is 0-based, so calculate on epochs 0, 10, 20, 30...
+            calculate_clinical = (epoch % self.gamma_freq == 0)
 
-        if calculate_clinical and self.loss_type in ['gamma', 'dvh', 'combined', 'clinical']:
+        if calculate_clinical:
+            print(f"    Calculating gamma on epoch {epoch} (frequency: {self.gamma_freq})")
             # Convert to numpy for clinical calculations
             pred_np = pred[0, 0].detach().cpu().numpy()  # First sample in batch
             target_np = target[0, 0].detach().cpu().numpy()
@@ -59,33 +60,16 @@ class ClinicalLoss(nn.Module):
                 target_np, pred_np, mask_np
             )
 
-            # Gamma loss (1 - pass_rate)
+            # Only gamma loss (1 - pass_rate) - DVH removed from loss calculation
             if 'gamma' in self.weights and self.weights['gamma'] > 0:
                 gamma_pass_rate = clinical_metrics.get('gamma_pass_rate', 100.0)
-                losses['gamma'] = torch.tensor(1.0 - gamma_pass_rate / 100.0,
-                                               device=pred.device)
+                gamma_loss = 1.0 - gamma_pass_rate / 100.0
+                losses['gamma'] = torch.tensor(gamma_loss, device=pred.device)
+                print(f"    Gamma pass rate: {gamma_pass_rate:.2f}%, Gamma loss: {gamma_loss:.4f}")
 
-            # DVH losses
-            if 'dvh' in self.weights and self.weights['dvh'] > 0:
-                dvh_loss = 0.0
-                dvh_metrics = ['D95_diff', 'D50_diff', 'D2_diff']
-                for metric in dvh_metrics:
-                    if metric in clinical_metrics:
-                        dvh_loss += clinical_metrics[metric]
-                losses['dvh'] = torch.tensor(dvh_loss / len(dvh_metrics),
-                                             device=pred.device)
-
-            # Individual DVH metric losses
-            for metric in ['d95', 'd50', 'd2']:
-                if metric in self.weights and self.weights[metric] > 0:
-                    metric_name = f'{metric.upper()}_diff'
-                    if metric_name in clinical_metrics:
-                        losses[metric] = torch.tensor(clinical_metrics[metric_name],
-                                                      device=pred.device)
-
-        # Calculate total weighted loss
+        # Calculate total weighted loss (iterate over a copy to avoid dict-size change during iteration)
         total_loss = torch.tensor(0.0, device=pred.device)
-        for loss_name, loss_value in losses.items():
+        for loss_name, loss_value in list(losses.items()):
             weight = self.weights.get(loss_name, 1.0)
             weighted_loss = weight * loss_value
             losses[f'{loss_name}_weighted'] = weighted_loss

@@ -1,212 +1,201 @@
-# Radiation Therapy Dose Distribution Autoencoder
+# DoseAE – Radiation Therapy Dose Autoencoders
 
-This repository contains implementations of various autoencoder architectures for modeling and compressing radiation therapy dose distributions. The code supports both 2D and 3D dose distributions, informative patch extraction, and multiple state-of-the-art autoencoder architectures.
+DoseAE is a research toolkit for learning generative and representation models of radiotherapy dose distributions.  The repository provides a modern preprocessing pipeline that consolidates raw planning data into HDF5 caches, flexible multi‑modal datasets (dose, CT, fused channels), configurable autoencoder architectures, and an Optuna‑driven optimisation workflow – all orchestrated through a single training script.
 
-## Features
+---
 
-- Multiple autoencoder architectures:
-  - Variational Autoencoder (VAE)
-  - ResNet Autoencoder
-  - UNet Autoencoder
-  - Convolutional Autoencoder
-  - MLP (Fully Connected) Autoencoder
-- Support for both 2D and 3D dose distributions
-- Informative patch extraction from dose distributions
-- Flexible data loading and preprocessing pipeline
-- Specialized normalization techniques for dose distributions
-- Hyperparameter optimization with Optuna
-- Experiment tracking with Weights & Biases
-- Comprehensive data analysis and visualization tools
+## Key Features
 
-## Project Structure
+- **Unified preprocessing**: `scripts/preprocess_with_new_pipeline.py` extracts CT volumes, dose grids, metadata, spatial coordinates, lobes, and cached patches into reusable HDF5 files.
+- **Multi-channel inputs**: build tensors with any combination of dose, CT, and fused channels; attention blocks can consume spatial, lobe, or dose metadata.
+- **Configurable architectures**: the `models/architectures` package contains a configurable autoencoder (conv/resnet/unet/mlp variants), DoseAE ResUNet, and both 2D/3D VAEs.
+- **Clinical losses & metrics**: optional gamma, DVH, and auxiliary targets integrate directly into the training loop.
+- **Optuna search space in config**: define tunable parameters once under `optuna.parameters`, then run Bayesian optimisation with `scripts/train.py --mode optimize`.
+- **WandB logging**: automatic run naming, tagging, and visualisation hooks.
+
+---
+
+## Repository Layout
 
 ```
-├── src/
-│   ├── models/
-│   │   ├── __init__.py          # Model factory
-│   │   ├── base_ae.py           # Base autoencoder class
-│   │   ├── vae.py               # 3D Variational Autoencoder
-│   │   ├── vae_2d.py            # 2D Autoencoder models
-│   │   ├── resnet_ae.py         # ResNet Autoencoder
-│   │   └── unet_ae.py           # UNet Autoencoder
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── dataset.py           # Dataset and DataLoader creation
-│   │   ├── preprocess.py        # Data preprocessing utilities
-│   │   └── transforms.py        # Data transformation classes
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── visualization.py     # Visualization utilities
-│   │   ├── metrics.py           # Evaluation metrics
-│   │   ├── optimization.py      # Optuna hyperparameter optimization
-│   │   ├── utils.py             # General utility functions
-│   │   ├── patch_extraction.py  # Informative patch extraction 
-│   │   ├── wandb_utils.py       # Weights & Biases utilities
-│   │   └── extract_patches.py   # Command-line patch extraction script
-│   ├── config/
-│   │   ├── __init__.py
-│   │   └── config.yaml          # Default configuration
-│   ├── train.py                 # Main training script
-│   └── inference.py             # Inference script
-├── notebooks/
-│   ├── data_exploration.ipynb   # Data exploration examples
-│   └── model_evaluation.ipynb   # Model evaluation examples
-├── tests/
+├── config/                     # YAML configurations
+│   ├── new_pipeline_config.yaml
+│   └── training_patches_05mm.yaml
+├── datasets/                   # Dataset helpers & transforms
 │   ├── __init__.py
-│   ├── test_models.py           # Tests for models
-│   ├── test_data.py             # Tests for data loading
-│   └── test_utils.py            # Tests for utilities
-├── .github/
-│   └── workflows/
-│       └── ci.yml               # GitHub Actions workflow
-├── requirements.txt             # Dependencies
-└── README.md                    # This file
+│   ├── loaders.py              # Shared dataset/loader utilities
+│   ├── transforms.py           # Legacy transform classes
+│   └── cached_dataset.py       # Backwards compatible shim
+├── entities/                   # Entity-specific logic (lung, hnc, …)
+│   └── lung/datasets/dataset.py
+├── models/
+│   ├── architectures/          # Configurable autoencoders & DoseAE ResUNet
+│   ├── components/             # Shared blocks (attention, resnet, unet)
+│   └── __init__.py             # Model factory
+├── core/
+│   ├── training/trainer.py     # Main training engine
+│   ├── evaluation/             # Clinical/standard metrics
+│   └── optimization/           # Neptune legacy optimiser
+├── scripts/
+│   ├── preprocess_with_new_pipeline.py
+│   ├── train.py                # Main entry (train / optimise)
+│   ├── inference.py            # Evaluation utilities
+│   ├── train_three_experiments.py (legacy)
+│   └── run_experiments.py (legacy)
+├── utils/
+│   ├── clinical_loss.py, clinical_metrics.py, optimization.py, …
+├── README.md
+└── requirements.txt
 ```
+
+Legacy code from the original project remains under `legacy_*` scripts and unused packages; avoid `data/datasets` – all dataset helpers now live in `datasets/`.
+
+---
 
 ## Installation
 
-1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/dose-distribution-autoencoder.git
-cd dose-distribution-autoencoder
-```
+git clone https://github.com/your-org/doseae.git
+cd doseae
 
-2. Create a virtual environment and install dependencies:
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+If you plan to use WandB or Neptune ensure the corresponding environment variables / logins are configured.
+
+---
+
 ## Data Preparation
 
-### Extracting Slices from NRRD Files
+1. **Prepare split definitions & mapping**  
+   - `config/new_pipeline_config.yaml` references `data/full_splits_auto.json` and `data/ct_dose_file_mapping.json`.  Update these to match your institution identifiers and file layout.
 
-To extract 2D slices from 3D NRRD files:
+2. **Run preprocessing**  
+   ```bash
+   python scripts/preprocess_with_new_pipeline.py \
+       --config config/new_pipeline_config.yaml \
+       --splits data/full_splits_auto.json \
+       --output /data/NSCLC-Cetuximab_AE_cache \
+       --n_patients 8 \
+       --experiment_type patch \
+       --workers 4
+   ```
+   This creates `/processed_patches/{split}.h5` and `/processed_images/{split}.h5` directories containing the cached tensors and metadata consumed during training.
 
-```bash
-python -m src.utils.utils extract_slices --input /path/to/file.nrrd --output /path/to/output.npy --mode all
-```
+---
 
-### Extracting Informative Patches
+## Training
 
-To extract informative patches from slices:
+The entire training pipeline is handled by `scripts/train.py`.  The YAML config fully specifies dataset paths, model choices, clinical losses, logging, and optimisation ranges.
 
-```bash
-python -m src.utils.extract_patches --input-dir /path/to/slices --output-dir /path/to/patches
-```
+### Configuration essentials (`config/training_patches_05mm.yaml`)
 
-### Analyzing Dataset Statistics
+- `dataset`: references the preprocessed HDF5 files; toggles between patches vs. full images, 2D slice mode, transform usage, and channel fusion.
+- `model`: chooses the architecture type (`resnet_ae`, `unet_ae`, `conv_autoencoder`, `mlp_autoencoder`, `vae`, `doseae_resunet`) and sets latent dimensions, attention config, auxiliary heads, etc.
+- `hyperparameters` & `training`: standard optimisation parameters (lr, batch size, scheduler, loss mode, grad clip, accumulation steps).
+- `clinical_metrics` / `loss_function`: enable gamma/DVH losses and diagnostics.
+- `optuna.parameters`: declarative search space for optimisation mode.
+- `output`: where checkpoints, logs, and training history are stored (defaults to config paths but can be overridden on the CLI).
 
-```bash
-python -m src.utils.utils analyze --input-dir /path/to/data --output-csv stats.csv
-```
-
-## Usage
-
-### Configuration
-
-The project uses YAML configuration files to define all model and training parameters. You can modify the default configuration in `src/config/config.yaml` or create your own configuration files.
-
-Key configuration sections include:
-- `dataset`: Data loading and splitting parameters
-- `preprocessing`: Data preprocessing options
-- `model`: Model architecture and parameters
-- `hyperparameters`: Training hyperparameters
-- `training`: Training process configuration
-- `wandb`: Weights & Biases integration
-- `optuna`: Hyperparameter optimization settings
-- `output`: Output directories for models and results
-- `patch_extraction`: Patch extraction parameters
-
-### Training a Model
-
-To train a model with the default configuration:
+### Run a standard training job
 
 ```bash
-python -m src.train --config src/config/config.yaml
+python scripts/train.py \
+    --config config/training_patches_05mm.yaml \
+    --entity lung \
+    --data_dir /data/NSCLC-Cetuximab_AE_cache \
+    --mode train \
+    --log_level INFO
 ```
 
-To train a model on a specific .npy file:
+Key behaviours:
+- Output directories are resolved from the config (and created automatically); use `--output_dir` to override `output.results_dir`.
+- Datasets are constructed through `datasets.loaders.create_data_loaders`, so no more imports from the removed `data.datasets` package.
+- The trainer automatically merges legacy `hyperparameters` values into the `training` block and handles attention/clinical loss wiring.
+- Clinical metrics (gamma, DVH) are computed periodically if enabled and logged to WandB.
+
+### Train with WandB
+
+Ensure `wandb.use_wandb: true` and set `project_name`, `entity`, and optional tags in the config.  The script will initialise WandB before training begins and log reconstruction samples/metrics.
+
+---
+
+## Hyperparameter Optimisation
+
+Optuna parameters are now declared directly in the config under `optuna.parameters`.  Each entry describes the dot-path into the config, the sampler type, and ranges/choices:
+
+```yaml
+optuna:
+  use_optuna: true
+  n_trials: 50
+  timeout: 86400
+  parameters:
+    - name: model.latent_dim
+      type: int
+      low: 32
+      high: 256
+      log: true
+    - name: training.loss
+      type: categorical
+      choices: ['mse', 'combined', 'clinical']
+    - name: loss_function.weights.gamma
+      type: float
+      low: 0.0
+      high: 0.5
+```
+
+Run optimisation with:
 
 ```bash
-python -m src.train --config src/config/config.yaml --data-file /path/to/data.npy
+python scripts/train.py \
+    --config config/training_patches_05mm.yaml \
+    --entity lung \
+    --data_dir /data/NSCLC-Cetuximab_AE_cache \
+    --mode optimize
 ```
 
-To run hyperparameter optimization:
+`utils/optimization.py` consumes the parameter list and applies suggestions to a copied config before each trial; no code changes are needed to expand the search space – simply edit the YAML.
+
+> **Neptune legacy support**: `core/optimization/neptune_optimizer.py` remains for backwards compatibility.  The new Optuna flow does not require Neptune.
+
+---
+
+## Inference & Evaluation
+
+Use `scripts/inference.py` to generate clinical metrics, DVH plots, and gamma maps for a trained checkpoint:
 
 ```bash
-python -m src.train --config src/config/config.yaml --optimize
+python scripts/inference.py \
+    --config config/training_patches_05mm.yaml \
+    --model /path/to/checkpoint.pth \
+    --data_dir /data/NSCLC-Cetuximab_AE_cache \
+    --output_dir ./evaluation \
+    --use_wandb
 ```
 
-### Inference
+The script relies on `datasets.loaders.create_data_loaders`, so the same HDF5 caches and config are required.
 
-To run inference on a trained model:
+---
 
-```bash
-python -m src.inference --model /path/to/model.pth --data /path/to/data.npy --config src/config/config.yaml
-```
+## Notes & Legacy Artifacts
 
-### Using Weights & Biases
+- `scripts/train_three_experiments.py` and `scripts/run_experiments.py` are preserved for reference; they now import the compatibility shim in `datasets/cached_dataset.py`.
+- The original `data/datasets` package was removed to avoid clashes with the new dataset helpers.  Update any downstream notebooks or scripts to import from `datasets.*` instead.
+- Pretrained encoder support is currently a stub (`pretrained_encoder` block); loading ImageNet / MedImageNet weights will require further integration.
 
-This project integrates with [Weights & Biases](https://wandb.ai/) for experiment tracking. To use it:
-
-1. Install wandb: `pip install wandb`
-2. Login to your wandb account: `wandb login`
-3. Set `use_wandb: true` in your configuration file
-4. Configure your project and entity name in the configuration file
-
-To download runs from Weights & Biases:
-
-```bash
-python -m src.utils.wandb_utils download --entity your_entity --project your_project --run-id run_id --output-dir ./runs
-```
-
-### Hyperparameter Optimization
-
-The project uses [Optuna](https://optuna.org/) for hyperparameter optimization. To use it:
-
-1. Set `use_optuna: true` in your configuration file
-2. Configure the optimization parameters in the `optuna` section
-3. Run training with the `--optimize` flag
-
-## Model Architectures
-
-### Variational Autoencoder (VAE)
-
-The VAE implementation includes both 2D and 3D versions with configurable latent space dimensions and network architectures.
-
-### ResNet Autoencoder
-
-The ResNet autoencoder uses residual blocks to improve gradient flow during training, making it suitable for deeper architectures.
-
-### UNet Autoencoder
-
-The UNet autoencoder uses skip connections to preserve spatial information, which is important for dose distribution modeling.
-
-### Additional Architectures
-
-- Convolutional Autoencoder: A simple convolutional architecture
-- MLP Autoencoder: A fully connected architecture for smaller datasets
-
-## Data Preprocessing
-
-The project includes comprehensive preprocessing options for dose distribution data:
-
-- 95th percentile normalization
-- Z-score normalization
-- Min-max normalization
-- Data augmentation (rotation, flipping, brightness adjustment)
-- Informative patch extraction
+---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+1. Fork and clone the repository.
+2. Create a feature branch: `git checkout -b feature/my-change`.
+3. Make your edits and ensure `python -m compileall` (or your linter/tests) succeed.
+4. Open a pull request describing your changes; include sample commands/config snippets where relevant.
 
-## License
+---
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+## Citation
 
-## Acknowledgements
-
-This project builds upon previous work in radiation therapy dose distribution modeling. Special thanks to the contributors of the original codebase and the research community working on this important healthcare application.
+If you use DoseAE in academic work, please cite the repository and (if applicable) the associated publication once available.  A proper BibTeX entry will be added when the manuscript is released.
