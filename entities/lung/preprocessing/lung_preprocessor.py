@@ -870,96 +870,147 @@ class LungPreprocessor(BasePreprocessor):
         import json
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        ct_list = []
-        dose_list = []
-        coord_list = []
-        metadata_all = []
-        ipsi_indices = []
-        contra_indices = []
+        output_path.unlink(missing_ok=True)
+
+        metadata_all: List[Dict[str, Any]] = []
+        ipsi_indices: List[int] = []
+        contra_indices: List[int] = []
         lobe_mapping = {
             'ipsilateral': {lobe: [] for lobe in STANDARD_LOBE_NAMES.values()},
             'contralateral': {lobe: [] for lobe in STANDARD_LOBE_NAMES.values()}
         }
-        patient_summary = {}
+        patient_summary: Dict[str, Any] = {}
         corrupted_patients = []
+
+        ct_ds = dose_ds = coords_ds = None
+        patch_shape = None
+        coord_width = None
         offset = 0
-        for pid in patient_ids:
-            cache_path = self._get_patch_cache_file(split_name, pid, ensure_dir=False)
-            if not cache_path.exists():
-                continue
-            try:
-                with h5py.File(cache_path, 'r') as f:
-                    ct = f['ct_patches'][()]
-                    dose = f['dose_patches'][()]
-                    coords = f['spatial_coords'][()]
-                    ipsi_local = f['ipsi_indices'][()].astype(np.int64).tolist()
-                    contra_local = f['contra_indices'][()].astype(np.int64).tolist()
-                    metadata_raw = f['metadata'][()]
-                    metadata_local = json.loads(self._decode_hdf5_json_blob(metadata_raw))
-                    lobe_local_raw = f['lobe_mapping'][()]
-                    lobe_local = json.loads(self._decode_hdf5_json_blob(lobe_local_raw))
-                    summary_raw = f['patient_summary'][()]
-                    summary_local = json.loads(self._decode_hdf5_json_blob(summary_raw))
-            except (OSError, KeyError, json.JSONDecodeError) as exc:
-                self.logger.error(
-                    "Corrupted or incompatible patch cache detected for %s at %s: %s",
-                    pid, cache_path, exc
-                )
-                corrupted_patients.append((pid, str(cache_path), str(exc)))
-                continue
-            ct_list.append(ct)
-            dose_list.append(dose)
-            coord_list.append(coords)
-            for meta in metadata_local:
-                meta['patch_id'] = meta['patch_id'] + offset
-                metadata_all.append(meta)
-            ipsi_indices.extend([idx + offset for idx in ipsi_local])
-            contra_indices.extend([idx + offset for idx in contra_local])
-            for side in ['ipsilateral', 'contralateral']:
-                for lobe, indices in lobe_local.get(side, {}).items():
-                    lobe_mapping[side][lobe].extend([idx + offset for idx in indices])
-            patient_summary[pid] = summary_local
-            offset += ct.shape[0]
-        
-        if not ct_list:
-            if corrupted_patients:
-                issues = "; ".join([f"{pid} ({path})" for pid, path, _ in corrupted_patients])
-                raise RuntimeError(
-                    "Unable to consolidate cached patches because the following cache files "
-                    f"are corrupted or outdated: {issues}. "
-                    "Please delete these files and rerun preprocessing for those patients."
-                )
-            self.logger.warning("No cached patch data available for consolidation")
-            return
-        
-        ct_array = np.concatenate(ct_list, axis=0)
-        dose_array = np.concatenate(dose_list, axis=0)
-        coords_array = np.concatenate(coord_list, axis=0)
-        
-        import h5py
-        import json
-        output_path.unlink(missing_ok=True)
-        with h5py.File(output_path, 'w') as f:
-            f.create_dataset('ct_patches', data=ct_array, compression='gzip', compression_opts=4)
-            f.create_dataset('dose_patches', data=dose_array, compression='gzip', compression_opts=4)
-            f.create_dataset('spatial_coords', data=coords_array, compression='gzip', compression_opts=4)
-            f.create_dataset('ipsi_indices', data=np.array(ipsi_indices, dtype=np.int64))
-            f.create_dataset('contra_indices', data=np.array(contra_indices, dtype=np.int64))
-            f.create_dataset('patch_metadata', data=json.dumps(metadata_all, indent=2).encode('utf-8'))
-            f.create_dataset('lobe_mapping', data=json.dumps(lobe_mapping, indent=2).encode('utf-8'))
-            f.create_dataset('patient_summary', data=json.dumps(patient_summary, indent=2).encode('utf-8'))
-            f.attrs['total_patches'] = ct_array.shape[0]
-            f.attrs['total_ipsi_patches'] = len(ipsi_indices)
-            f.attrs['total_contra_patches'] = len(contra_indices)
-            f.attrs['n_patients'] = len(patient_summary)
+        file_handle = None
+
+        try:
+            for pid in patient_ids:
+                cache_path = self._get_patch_cache_file(split_name, pid, ensure_dir=False)
+                if not cache_path.exists():
+                    continue
+                try:
+                    with h5py.File(cache_path, 'r') as f_cache:
+                        ct = f_cache['ct_patches'][()]
+                        dose = f_cache['dose_patches'][()]
+                        coords = f_cache['spatial_coords'][()]
+                        ipsi_local = f_cache['ipsi_indices'][()].astype(np.int64).tolist()
+                        contra_local = f_cache['contra_indices'][()].astype(np.int64).tolist()
+                        metadata_raw = f_cache['metadata'][()]
+                        metadata_local = json.loads(self._decode_hdf5_json_blob(metadata_raw))
+                        lobe_local_raw = f_cache['lobe_mapping'][()]
+                        lobe_local = json.loads(self._decode_hdf5_json_blob(lobe_local_raw))
+                        summary_raw = f_cache['patient_summary'][()]
+                        summary_local = json.loads(self._decode_hdf5_json_blob(summary_raw))
+                except (OSError, KeyError, json.JSONDecodeError) as exc:
+                    self.logger.error(
+                        "Corrupted or incompatible patch cache detected for %s at %s: %s",
+                        pid, cache_path, exc
+                    )
+                    corrupted_patients.append((pid, str(cache_path), str(exc)))
+                    continue
+
+                if ct.size == 0:
+                    continue
+
+                if file_handle is None:
+                    file_handle = h5py.File(output_path, 'w')
+                    patch_shape = ct.shape[1:]
+                    coord_width = coords.shape[1]
+                    chunk_len = max(1, min(64, ct.shape[0]))
+                    ct_ds = file_handle.create_dataset(
+                        'ct_patches',
+                        shape=(0,) + patch_shape,
+                        maxshape=(None,) + patch_shape,
+                        chunks=(chunk_len,) + patch_shape,
+                        dtype=ct.dtype,
+                        compression='gzip',
+                        compression_opts=4
+                    )
+                    dose_ds = file_handle.create_dataset(
+                        'dose_patches',
+                        shape=(0,) + patch_shape,
+                        maxshape=(None,) + patch_shape,
+                        chunks=(chunk_len,) + patch_shape,
+                        dtype=dose.dtype,
+                        compression='gzip',
+                        compression_opts=4
+                    )
+                    coords_ds = file_handle.create_dataset(
+                        'spatial_coords',
+                        shape=(0, coord_width),
+                        maxshape=(None, coord_width),
+                        chunks=(max(1, min(2048, coords.shape[0])), coord_width),
+                        dtype=coords.dtype,
+                        compression='gzip',
+                        compression_opts=4
+                    )
+
+                new_offset = offset + ct.shape[0]
+                ct_ds.resize((new_offset,) + patch_shape)
+                ct_ds[offset:new_offset] = ct
+                dose_ds.resize((new_offset,) + patch_shape)
+                dose_ds[offset:new_offset] = dose
+                coords_ds.resize((new_offset, coord_width))
+                coords_ds[offset:new_offset] = coords
+
+                for meta in metadata_local:
+                    meta['patch_id'] = meta['patch_id'] + offset
+                    metadata_all.append(meta)
+                ipsi_indices.extend([idx + offset for idx in ipsi_local])
+                contra_indices.extend([idx + offset for idx in contra_local])
+                for side in ['ipsilateral', 'contralateral']:
+                    for lobe, indices in lobe_local.get(side, {}).items():
+                        lobe_mapping[side][lobe].extend([idx + offset for idx in indices])
+                patient_summary[pid] = summary_local
+                offset = new_offset
+
+            if file_handle is None:
+                if corrupted_patients:
+                    issues = "; ".join([f"{pid} ({path})" for pid, path, _ in corrupted_patients])
+                    raise RuntimeError(
+                        "Unable to consolidate cached patches because the following cache files "
+                        f"are corrupted or outdated: {issues}. "
+                        "Please delete these files and rerun preprocessing for those patients."
+                    )
+                self.logger.warning("No cached patch data available for consolidation")
+                return
+
+            file_handle.create_dataset('ipsi_indices', data=np.array(ipsi_indices, dtype=np.int64))
+            file_handle.create_dataset('contra_indices', data=np.array(contra_indices, dtype=np.int64))
+            file_handle.create_dataset(
+                'patch_metadata',
+                data=json.dumps(metadata_all, indent=2).encode('utf-8')
+            )
+            file_handle.create_dataset(
+                'lobe_mapping',
+                data=json.dumps(lobe_mapping, indent=2).encode('utf-8')
+            )
+            file_handle.create_dataset(
+                'patient_summary',
+                data=json.dumps(patient_summary, indent=2).encode('utf-8')
+            )
+            file_handle.attrs['total_patches'] = offset
+            file_handle.attrs['total_ipsi_patches'] = len(ipsi_indices)
+            file_handle.attrs['total_contra_patches'] = len(contra_indices)
+            file_handle.attrs['n_patients'] = len(patient_summary)
+        finally:
+            if file_handle is not None:
+                file_handle.close()
     
     def consolidate_patches_to_hdf5(self, patient_results: List[Dict[str, Any]],
                                     output_path: str, split_name: Optional[str] = None,
                                     all_patient_ids: Optional[List[str]] = None):
         ids: List[str] = list(all_patient_ids) if all_patient_ids else []
         for result in patient_results:
-            self._save_patch_patient_cache(result, split_name)
+            if not result:
+                continue
+            if result.get('patches_data'):
+                self._save_patch_patient_cache(result, split_name)
             pid = result.get('patient_id')
             if pid:
                 ids.append(pid)

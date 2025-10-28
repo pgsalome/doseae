@@ -40,8 +40,9 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
     preprocessor = LungPreprocessor(config, str(output_dir))
     patient_ids = [patient['patient_id'] for patient in patients]
     
-    results = []
-    
+    results: List[Dict[str, Any]] = []
+    collect_results = experiment_type != 'patch'
+
     def _process_single(item):
         index, patient = item
         patient_id = patient['patient_id']
@@ -73,7 +74,9 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
                     torch.cuda.empty_cache()
             except:
                 pass
-            return result
+            if collect_results:
+                return result
+            return {'patient_id': patient_id}
         except Exception as e:
             logger.error(f"❌ Failed to process {patient_id}: {e}")
             # Clean up memory even on failure
