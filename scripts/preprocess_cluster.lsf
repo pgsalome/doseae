@@ -1,0 +1,16 @@
+#!/bin/bash
+#BSUB -J doseae_preproc
+#BSUB -q normal
+#BSUB -n 4
+#BSUB -R "rusage[mem=64000]"
+#BSUB -W 48:00
+#BSUB -oo logs/preprocess.%J.out
+#BSUB -eo logs/preprocess.%J.err
+
+set -euo pipefail
+
+cd /PHShome/ps1059/projects/git/doseae
+mkdir -p logs
+
+./scripts/run_preprocessing_cluster.sh
+

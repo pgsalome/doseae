@@ -52,6 +52,8 @@ class LungPreprocessor(BasePreprocessor):
         self.patch_size = self.lung_config.get('patch_size', 50)
         self.overlap_percentage = self.lung_config.get('overlap_percentage', 20)
         self.dose_threshold = self.lung_config.get('dose_threshold', 0.1)
+        self.lobe_acceptance = float(self.lung_config.get('mask_acceptance', 0.7))
+        self.lobe_composite_threshold = float(self.lung_config.get('lobe_composite_threshold', 0.1))
         self.max_patches_per_lobe = int(self.lung_config.get('max_patches_per_lobe', 0) or 0)
         cpu_count = max(1, os.cpu_count() or 1)
         self.patch_workers = int(self.lung_config.get('patch_workers', min(8, cpu_count)))
@@ -594,7 +596,7 @@ class LungPreprocessor(BasePreprocessor):
             'contralateral': {lobe: [] for lobe in STANDARD_LOBE_NAMES.values()},
             'summary': {}
         }
-        
+
         if 'left_lung' in organ_masks and 'right_lung' in organ_masks:
             ipsi_lung, contra_lung = self._determine_ipsi_contra_lungs(
                 organ_masks['left_lung'], organ_masks['right_lung'], dose_image
@@ -602,70 +604,149 @@ class LungPreprocessor(BasePreprocessor):
             ipsi_side = 'left' if ipsi_lung == organ_masks['left_lung'] else 'right'
         else:
             ipsi_side = 'unknown'
-        
+
+        ct_array = sitk.GetArrayFromImage(ct_image)
+        dose_array = sitk.GetArrayFromImage(dose_image)
+
+        left_array = sitk.GetArrayFromImage(organ_masks['left_lung']).astype(bool) if 'left_lung' in organ_masks else None
+        right_array = sitk.GetArrayFromImage(organ_masks['right_lung']).astype(bool) if 'right_lung' in organ_masks else None
+
+        if left_array is None and right_array is None:
+            lung_arrays = []
+            for lobe in STANDARD_LOBE_NAMES.values():
+                if lobe in organ_masks:
+                    lung_arrays.append(sitk.GetArrayFromImage(organ_masks[lobe]).astype(bool))
+            if not lung_arrays:
+                return patches_data
+            combined_lung = np.any(lung_arrays, axis=0)
+        else:
+            combined_lung = np.zeros_like(ct_array, dtype=bool)
+            if left_array is not None:
+                combined_lung |= left_array
+            if right_array is not None:
+                combined_lung |= right_array
+
+        if not np.any(combined_lung):
+            return patches_data
+
+        lobe_arrays: Dict[str, np.ndarray] = {}
+        for lobe_name in ['left_upper_lobe', 'left_lower_lobe', 'right_upper_lobe', 'right_middle_lobe', 'right_lower_lobe']:
+            if lobe_name in organ_masks:
+                lobe_arrays[lobe_name] = sitk.GetArrayFromImage(organ_masks[lobe_name]).astype(bool)
+
+        patch_size = self.patch_size
+        if ct_array.shape[0] < patch_size or ct_array.shape[1] < patch_size or ct_array.shape[2] < patch_size:
+            return patches_data
+
+        overlap_fraction = max(0.0, min(0.95, self.overlap_percentage / 100.0))
+        step = max(int(round(patch_size * (1.0 - overlap_fraction))), 1)
+
+        z_limit = ct_array.shape[0] - patch_size + 1
+        y_limit = ct_array.shape[1] - patch_size + 1
+        x_limit = ct_array.shape[2] - patch_size + 1
+        if z_limit <= 0 or y_limit <= 0 or x_limit <= 0:
+            return patches_data
+
         total_ipsi = 0
         total_contra = 0
-        lobe_summary = []
-        
-        lobe_organs = ['left_upper_lobe', 'left_lower_lobe',
-                       'right_upper_lobe', 'right_middle_lobe', 'right_lower_lobe']
+        lobe_summary: List[str] = []
 
-        futures = {}
-        with ThreadPoolExecutor(max_workers=self.patch_workers) as executor:
-            for organ_name in lobe_organs:
-                if organ_name in organ_masks:
-                    futures[executor.submit(
-                        self._extract_patches_from_organ,
-                        ct_image, dose_image, organ_masks[organ_name], organ_name
-                    )] = organ_name
-
-            for future in as_completed(futures):
-                organ_name = futures[future]
-                try:
-                    ct_patches, dose_patches, locations = future.result()
-                except Exception as exc:
-                    self.logger.error(f"Patch extraction failed for {organ_name}: {exc}")
-                    ct_patches, dose_patches, locations = [], [], []
-
-                side_type = 'ipsilateral' if LOBE_TO_SIDE[organ_name] == ipsi_side else 'contralateral'
-                bucket = patches_data[side_type][organ_name]
-                limit_reached = False
-                for ct_patch, dose_patch, loc in zip(ct_patches, dose_patches, locations):
-                    if self.max_patches_per_lobe and len(bucket) >= self.max_patches_per_lobe:
-                        if not limit_reached:
-                            self.logger.warning(
-                                "Reached patch limit (%d) for %s on patient %s; skipping remaining patches",
-                                self.max_patches_per_lobe,
-                                organ_name,
-                                patient_id
-                            )
-                            limit_reached = True
+        for z_start in range(0, z_limit, step):
+            for y_start in range(0, y_limit, step):
+                for x_start in range(0, x_limit, step):
+                    lung_slice = combined_lung[
+                        z_start:z_start + patch_size,
+                        y_start:y_start + patch_size,
+                        x_start:x_start + patch_size
+                    ]
+                    lung_voxels = int(np.count_nonzero(lung_slice))
+                    if lung_voxels == 0:
                         continue
+                    lung_ratio = float(lung_voxels) / lung_slice.size
+                    if lung_ratio < self.lobe_acceptance:
+                        continue
+
+                    lobe_counts = {}
+                    for lobe_name, mask_array in lobe_arrays.items():
+                        lobe_counts[lobe_name] = int(np.count_nonzero(
+                            mask_array[
+                                z_start:z_start + patch_size,
+                                y_start:y_start + patch_size,
+                                x_start:x_start + patch_size
+                            ]
+                        ))
+
+                    if not lobe_counts:
+                        continue
+                    best_lobe = max(lobe_counts, key=lobe_counts.get)
+                    best_count = lobe_counts[best_lobe]
+                    if best_count == 0:
+                        continue
+
+                    lobe_fractions = {
+                        lobe_name: (count / float(lung_voxels)) if lung_voxels else 0.0
+                        for lobe_name, count in lobe_counts.items()
+                    }
+                    patch_fractions = {
+                        lobe_name: count / float(lung_slice.size)
+                        for lobe_name, count in lobe_counts.items()
+                    }
+                    significant_lobes = [
+                        lobe_name for lobe_name, fraction in lobe_fractions.items()
+                        if fraction >= self.lobe_composite_threshold
+                    ]
+                    if not significant_lobes:
+                        significant_lobes = [best_lobe]
+                    composite_label = '+'.join(sorted(significant_lobes))
+
+                    side_type = 'ipsilateral' if LOBE_TO_SIDE.get(best_lobe, 'unknown') == ipsi_side else 'contralateral'
+                    bucket = patches_data[side_type][best_lobe]
+                    if self.max_patches_per_lobe and len(bucket) >= self.max_patches_per_lobe:
+                        continue
+
+                    ct_patch = ct_array[
+                        z_start:z_start + patch_size,
+                        y_start:y_start + patch_size,
+                        x_start:x_start + patch_size
+                    ].copy()
+                    dose_patch = dose_array[
+                        z_start:z_start + patch_size,
+                        y_start:y_start + patch_size,
+                        x_start:x_start + patch_size
+                    ].copy()
+
                     bucket.append({
                         'ct_patch': ct_patch,
                         'dose_patch': dose_patch,
-                        'spatial_coord': [hash(patient_id) % 1_000_000,
-                                          loc['coordinates'][1], loc['coordinates'][2], loc['coordinates'][0]],
-                        'center_coords': [loc['coordinates'][2] + self.patch_size // 2,
-                                          loc['coordinates'][1] + self.patch_size // 2,
-                                          loc['coordinates'][0] + self.patch_size // 2],
-                        'organ_ratio': loc['organ_ratio'],
-                        'lobe_name': organ_name,
+                        'start_coords': [z_start, y_start, x_start],
+                        'spatial_coord': [hash(patient_id) % 1_000_000, y_start, x_start, z_start],
+                        'center_coords': [
+                            x_start + patch_size // 2,
+                            y_start + patch_size // 2,
+                            z_start + patch_size // 2
+                        ],
+                        'organ_ratio': lung_ratio,
+                        'lobe_name': best_lobe,
                         'side_type': side_type,
-                        'anatomical_side': LOBE_TO_SIDE[organ_name],
+                        'anatomical_side': LOBE_TO_SIDE.get(best_lobe, 'unknown'),
                         'dose_mean': float(np.mean(dose_patch)),
                         'dose_max': float(np.max(dose_patch)),
                         'dose_std': float(np.std(dose_patch)),
-                        'is_high_dose': bool(np.max(dose_patch) > 0.5)
+                        'is_high_dose': bool(np.max(dose_patch) > 0.5),
+                        'lobe_voxel_fraction': lobe_fractions.get(best_lobe, 0.0),
+                        'lobe_patch_fraction': patch_fractions.get(best_lobe, 0.0),
+                        'lobe_fractions': lobe_fractions,
+                        'lobe_patch_fractions': patch_fractions,
+                        'composite_lobes': significant_lobes,
+                        'composite_label': composite_label
                     })
-                count = len(bucket)
-                if side_type == 'ipsilateral':
-                    total_ipsi += count
-                else:
-                    total_contra += count
-                if count:
-                    lobe_summary.append(organ_name)
-        
+                    if side_type == 'ipsilateral':
+                        total_ipsi += 1
+                    else:
+                        total_contra += 1
+                    if best_lobe not in lobe_summary:
+                        lobe_summary.append(best_lobe)
+
         patches_data['summary'] = {
             'ipsi_side': ipsi_side,
             'contra_side': 'right' if ipsi_side == 'left' else 'left',
