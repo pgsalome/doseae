@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doseae"
+version = "0.1.0"
+description = "Dose distribution autoencoder tools and pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = [
+  "tests*",
+  "optuna_runs*",
+  "external*",
+  "wandb_artifacts*",
+  "prototwin-pet-cun-fred*",
+  "cOOpD*",
+]
