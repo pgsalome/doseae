@@ -5,11 +5,13 @@ Shared dataset construction utilities used by training, inference, and tuning.
 from __future__ import annotations
 
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple, List
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from entities.lung.datasets import ImageH5Dataset, PatchDataset
@@ -25,6 +27,9 @@ def build_transform_pipeline(transform_cfg: Dict[str, Any]):
     flip_enabled = transform_cfg.get('flip', False)
     brightness_enabled = transform_cfg.get('adjust_brightness', False)
     noise_enabled = transform_cfg.get('random_noise', False)
+    anatomy_cfg = transform_cfg.get('anatomy_deformation', {}) or {}
+    anatomy_enabled = bool(anatomy_cfg.get('enabled', False))
+    anatomy_prob = float(anatomy_cfg.get('probability', 0.5))
     random_crop_enabled = transform_cfg.get('random_crop', False)
 
     if random_crop_enabled:
@@ -55,16 +60,97 @@ def build_transform_pipeline(transform_cfg: Dict[str, Any]):
         brightness_delta = random.uniform(-0.1, 0.1) if brightness_enabled else 0.0
         noise_std = 0.05 if noise_enabled else 0.0
 
-        def _apply_ops(tensor: torch.Tensor) -> torch.Tensor:
+        def _generate_anatomy_theta(sample_shape: torch.Size) -> Optional[torch.Tensor]:
+            if not anatomy_enabled or random.random() >= anatomy_prob:
+                return None
+
+            if len(sample_shape) < 4:
+                return None  # Expecting (C, D, H, W)
+
+            _, depth, height, width = sample_shape[-4], sample_shape[-3], sample_shape[-2], sample_shape[-1]
+
+            max_rot = float(anatomy_cfg.get('max_rotation_deg', 5.0))
+            max_trans = float(anatomy_cfg.get('max_translation_voxels', 2.0))
+            scale_range = anatomy_cfg.get('scale_range', [0.95, 1.05])
+            if not isinstance(scale_range, (list, tuple)) or len(scale_range) != 2:
+                scale_range = [0.95, 1.05]
+
+            rx = math.radians(random.uniform(-max_rot, max_rot))
+            ry = math.radians(random.uniform(-max_rot, max_rot))
+            rz = math.radians(random.uniform(-max_rot, max_rot))
+
+            sx = random.uniform(scale_range[0], scale_range[1])
+            sy = random.uniform(scale_range[0], scale_range[1])
+            sz = random.uniform(scale_range[0], scale_range[1])
+
+            tx = random.uniform(-max_trans, max_trans)
+            ty = random.uniform(-max_trans, max_trans)
+            tz = random.uniform(-max_trans, max_trans)
+
+            cx = math.cos(rx)
+            sx_sin = math.sin(rx)
+            cy = math.cos(ry)
+            sy_sin = math.sin(ry)
+            cz = math.cos(rz)
+            sz_sin = math.sin(rz)
+
+            rot_x = torch.tensor([[1, 0, 0],
+                                  [0, cx, -sx_sin],
+                                  [0, sx_sin, cx]], dtype=torch.float32)
+            rot_y = torch.tensor([[cy, 0, sy_sin],
+                                  [0, 1, 0],
+                                  [-sy_sin, 0, cy]], dtype=torch.float32)
+            rot_z = torch.tensor([[cz, -sz_sin, 0],
+                                  [sz_sin, cz, 0],
+                                  [0, 0, 1]], dtype=torch.float32)
+
+            rot = rot_z @ rot_y @ rot_x
+            scale_matrix = torch.diag(torch.tensor([sx, sy, sz], dtype=torch.float32))
+            affine = rot @ scale_matrix
+
+            theta = torch.zeros((3, 4), dtype=torch.float32)
+            theta[:, :3] = affine
+            # Normalize translations to [-1, 1]
+            theta[0, 3] = 2.0 * tx / max(width - 1, 1)
+            theta[1, 3] = 2.0 * ty / max(height - 1, 1)
+            theta[2, 3] = 2.0 * tz / max(depth - 1, 1)
+
+            return theta
+
+        def _apply_anatomy(tensor: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+            if tensor.dim() < 4:
+                return tensor
+            device = tensor.device
+            dtype = tensor.dtype
+            theta = theta.to(device=device, dtype=torch.float32)
+
+            input_tensor = tensor.unsqueeze(0)
+            grid = F.affine_grid(theta.unsqueeze(0), size=input_tensor.shape, align_corners=True)
+            warped = F.grid_sample(
+                input_tensor.float(),
+                grid,
+                mode='bilinear',
+                padding_mode='reflection',
+                align_corners=True,
+            )
+            return warped.squeeze(0).to(dtype=dtype)
+
+        def _apply_ops(tensor: torch.Tensor, theta: Optional[torch.Tensor]) -> torch.Tensor:
             result = tensor.clone()
             if dims_to_flip:
                 result = torch.flip(result, dims=dims_to_flip)
             if k_rot and result.dim() >= 3:
                 result = torch.rot90(result, k_rot, dims=(-2, -1))
+            if theta is not None:
+                result = _apply_anatomy(result, theta)
             return result
 
+        anatomy_theta = None
+        if anatomy_enabled:
+            anatomy_theta = _generate_anatomy_theta(transformed[tensor_keys[0]].shape)
+
         for key in tensor_keys:
-            transformed[key] = _apply_ops(transformed[key])
+            transformed[key] = _apply_ops(transformed[key], anatomy_theta)
 
         if 'input' in transformed and torch.is_tensor(transformed['input']):
             tensor = transformed['input'].clone()
@@ -213,6 +299,38 @@ class _SliceDataset(Dataset):
         return slice_sample
 
 
+def collate_medical_batch(batch: Sequence[dict]) -> dict:
+    """Custom collate function that tolerates mixed metadata types."""
+    if not batch:
+        return {}
+
+    collated: Dict[str, Any] = {}
+    keys = batch[0].keys()
+
+    for key in keys:
+        values = [sample[key] for sample in batch]
+        first = values[0]
+
+        if torch.is_tensor(first):
+            try:
+                collated[key] = torch.stack(values)
+            except Exception:
+                collated[key] = values
+        elif isinstance(first, (int, float, bool)):
+            try:
+                collated[key] = torch.tensor(values)
+            except Exception:
+                collated[key] = values
+        elif isinstance(first, (list, tuple)):
+            collated[key] = list(values)
+        elif isinstance(first, dict):
+            collated[key] = values
+        else:
+            collated[key] = values
+
+    return collated
+
+
 def create_data_loaders(
     config: Dict[str, Any],
     entity_type: Optional[str] = None,
@@ -269,23 +387,27 @@ def create_data_loaders(
         model_cfg.setdefault('in_channels', inferred_channels)
     model_cfg.setdefault('output_channels', 1)
 
+    batch_size = int(config.get('training', {}).get('batch_size', 1) or 1)
     if dataset_cfg.get('test_mode', False):
-        limit = int(dataset_cfg.get('n_test_samples', 20))
-        if limit > 0:
+        limit_batches = int(dataset_cfg.get('n_test_samples', dataset_cfg.get('n_test_batches', 20)))
+        if limit_batches > 0:
+            limit_samples = limit_batches * batch_size
             logging.getLogger(__name__).info(
-                "Test mode enabled: restricting datasets to %d samples", limit
+                "Test mode enabled: restricting datasets to %d batches (%d samples)",
+                limit_batches,
+                limit_samples,
             )
-            train_dataset = _LimitedDataset(train_dataset, limit)
-            val_dataset = _LimitedDataset(val_dataset, limit)
+            train_dataset = _LimitedDataset(train_dataset, limit_samples)
+            val_dataset = _LimitedDataset(val_dataset, limit_samples)
 
     if dataset_cfg.get('limit_train_samples'):
         train_dataset = _LimitedDataset(train_dataset, dataset_cfg['limit_train_samples'])
     if dataset_cfg.get('limit_val_samples'):
         val_dataset = _LimitedDataset(val_dataset, dataset_cfg['limit_val_samples'])
 
-    batch_size = config.get('training', {}).get('batch_size', 1)
     num_workers = dataset_cfg.get('num_workers', config.get('data', {}).get('num_workers', 0))
     pin_memory = bool(dataset_cfg.get('pin_memory', False))
+    collate_fn = getattr(train_dataset, 'collate_fn', None) or collate_medical_batch
 
     train_loader = DataLoader(
         train_dataset,
@@ -293,7 +415,7 @@ def create_data_loaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        collate_fn=getattr(train_dataset, 'collate_fn', None),
+        collate_fn=collate_fn,
     )
 
     val_loader = DataLoader(
@@ -302,7 +424,7 @@ def create_data_loaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        collate_fn=getattr(val_dataset, 'collate_fn', None),
+        collate_fn=getattr(val_dataset, 'collate_fn', None) or collate_medical_batch,
     )
 
     return train_loader, val_loader
@@ -312,4 +434,5 @@ __all__ = [
     "build_transform_pipeline",
     "create_dataset",
     "create_data_loaders",
+    "collate_medical_batch",
 ]
