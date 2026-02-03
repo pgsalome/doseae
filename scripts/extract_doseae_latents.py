@@ -14,26 +14,29 @@ Segmentation caching:
 
 Examples
 --------
-1) Extract using an existing H5 (patch cache or consolidated train.h5):
+1) Extract using an existing H5 (consolidated train.h5 or per-patient cache):
 
-    CUDA_VISIBLE_DEVICES=1 python scripts/extract_doseae_latents.py \\
-      --config optuna_runs/patch_search/config_20251115_125045_trial14.json \\
-      --weights /data/pgsal/nsclc_doseae/lung_best_model.pth \\
-      --h5-path /data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/train.h5 \\
-      --patient-id 0617697905 \\
+    CUDA_VISIBLE_DEVICES=0 python scripts/extract_doseae_latents.py \\
+      --config optuna_runs/patch_search/config_YYYYMMDD_HHMMSS_trialNN.json \\
+      --weights /path/to/lung_best_model.pth \\
+      --h5-path /path/to/processed_patches/train.h5 \\
+      --patient-id xx \\
       --output-dir outputs/latents \\
       --device cuda
 
+   If `--h5-path` points to a per-patient cache (e.g. .../patient_cache/<PATIENT>.h5),
+   the script will use the embedded patient_id and `--patient-id` is optional.
+
 2) Extract using CT + Dose (recompute from scratch by default):
 
-    CUDA_VISIBLE_DEVICES=1 python scripts/extract_doseae_latents.py \\
-      --config optuna_runs/patch_search/config_20251115_125045_trial14.json \\
-      --weights /data/pgsal/nsclc_doseae/lung_best_model.pth \\
-      --ct-path /data/pgsal/NSCLC-Cetuximab/0617697905/20000909/TRA/NS/CT-DER-MP1/CTSFROMRTOGCONVERSION_PN_8476432.nrrd \\
-      --dose-path /data/pgsal/NSCLC-Cetuximab/0617697905/20000909/TRA/NS/RTDOSE-PLANf16T-PHY-MPT/RTDOSEFX1HETERO_PN_87474331_ct.nrrd \\
+    CUDA_VISIBLE_DEVICES=0 python scripts/extract_doseae_latents.py \\
+      --config optuna_runs/patch_search/config_YYYYMMDD_HHMMSS_trialNN.json \\
+      --weights /path/to/lung_best_model.pth \\
+      --ct-path /path/to/CT.nrrd \\
+      --dose-path /path/to/DOSE.nrrd \\
       --output-dir outputs/latents \\
       --device cuda \\
-      --segmentation-cache-dir outputs/latents/segmentation/0617697905
+      --segmentation-cache-dir outputs/latents/segmentation/<PATIENT_ID>
 
    To reuse existing per-patient patch cache (skip recompute), add `--use-cache`.
 """
@@ -682,6 +685,21 @@ def load_h5_patient_indices(
     return indices, entries
 
 
+def resolve_patient_id_for_h5(h5_path: Path, provided: Optional[str]) -> str:
+    if provided:
+        return provided
+    try:
+        with h5py.File(h5_path, "r") as f:
+            file_patient_id = f.attrs.get("patient_id")
+            if isinstance(file_patient_id, (bytes, bytearray)):
+                file_patient_id = file_patient_id.decode("utf-8")
+            if file_patient_id:
+                return str(file_patient_id)
+    except Exception:
+        pass
+    raise ValueError("--patient-id is required when using a multi-patient H5.")
+
+
 def extract_latents_from_h5_patient(
     model: torch.nn.Module,
     h5_path: Path,
@@ -1158,8 +1176,6 @@ def main() -> None:
         patient_id = args.patient_id or (infer_patient_id(ct_path) if ct_path else None)
         if not patient_id:
             patient_id = infer_patient_id_from_path(str(ct_path) if ct_path else None)
-        if args.h5_path and not patient_id:
-            raise ValueError("--patient-id is required when using --h5-path without CT/Dose paths.")
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         output_dir = args.output_dir
@@ -1191,6 +1207,7 @@ def main() -> None:
                     args.h5_path = str(cache_path)
 
         if args.h5_path:
+            patient_id = resolve_patient_id_for_h5(Path(args.h5_path), patient_id)
             input_channels = resolve_input_channels(config)
             ensure_model_config_for_channels(config, input_channels)
             model = get_model(config)
