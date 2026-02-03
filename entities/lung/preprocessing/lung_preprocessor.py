@@ -68,10 +68,32 @@ class LungPreprocessor(BasePreprocessor):
         self.segmentation_config = config.get('segmentation', {})
         self.segmentation_device_cfg = self.segmentation_config.get('device', 'auto')
         self.segmentation_devices = self._parse_segmentation_devices(self.segmentation_device_cfg)
+        self.segmentation_cache_dir = self.segmentation_config.get('cache_dir')
         self._segmentation_device_lock = threading.Lock()
         self._next_segmentation_device = 0
         max_concurrent = int(self.segmentation_config.get('max_concurrent', 1))
         self._segmentation_semaphore = threading.Semaphore(max(1, max_concurrent))
+
+        # Augmentation configuration
+        self.augmentation_config = config.get('augmentation', {})
+        self.synthetic_augmentor = None
+        if (
+            self.augmentation_config.get('enable_synthetic_dose', False)
+            and int(self.augmentation_config.get('synthetic_doses_per_patient', 0) or 0) > 0
+        ):
+            try:
+                from entities.lung.augmentation import OpenTPSDoseAugmentor
+
+                project_root = Path(__file__).resolve().parents[3]
+                self.synthetic_augmentor = OpenTPSDoseAugmentor(self.augmentation_config, project_root=project_root)
+                if not self.synthetic_augmentor.is_available():
+                    self.logger.warning(
+                        "OpenTPS augmentor unavailable; disabling synthetic dose generation."
+                    )
+                    self.synthetic_augmentor = None
+            except Exception as exc:
+                self.logger.error("Failed to initialise OpenTPS augmentor: %s", exc)
+                self.synthetic_augmentor = None
 
         # Output organization
         self.output_root = self.output_dir  # Base root for all experiment outputs
@@ -181,11 +203,15 @@ class LungPreprocessor(BasePreprocessor):
     # ------------------------------------------------------------------
     # Segmentation utilities
     # ------------------------------------------------------------------
-    def segment_organs(self, ct_image: sitk.Image) -> Dict[str, sitk.Image]:
+    def segment_organs(self, ct_image: sitk.Image, cache_dir: Optional[str] = None) -> Dict[str, sitk.Image]:
         """
         Segment lung lobes from CT image using TotalSegmentator.
         """
         with self._segmentation_semaphore:
+            cache_root = Path(cache_dir) if cache_dir else (Path(self.segmentation_cache_dir) if self.segmentation_cache_dir else None)
+            if cache_root is not None:
+                cache_root.mkdir(parents=True, exist_ok=True)
+
             device, env = self._determine_segmentation_device()
             try:
                 # Force garbage collection before segmentation
@@ -225,11 +251,11 @@ class LungPreprocessor(BasePreprocessor):
                 env.setdefault('JOBLIB_MULTIPROCESSING', '0')
                 env.setdefault('MP_NO_SEM', '1')
                 env.setdefault('CUDA_LAUNCH_BLOCKING', '1')  # For better error reporting
-                env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:64')  # Further limit CUDA memory allocation
+                env.setdefault('PYTORCH_ALLOC_CONF', 'max_split_size_mb:64')  # Further limit CUDA memory allocation
                 env.setdefault('OMP_NUM_THREADS', '1')  # Limit OpenMP threads
                 env.setdefault('MKL_NUM_THREADS', '1')  # Limit MKL threads
                 env.setdefault('CUDA_MEMORY_FRACTION', '0.5')  # Limit CUDA memory usage
-                env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:64,roundup_power2_divisions:16')  # Better memory management
+                env.setdefault('PYTORCH_ALLOC_CONF', 'max_split_size_mb:64,roundup_power2_divisions:16')  # Better memory management
                 
                 self.logger.info(f"Running TotalSegmentator: {' '.join(cmd)} on device={device}")
                 self.logger.info(f"Environment: CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', 'all')}")
@@ -252,19 +278,22 @@ class LungPreprocessor(BasePreprocessor):
                         
                         # Try fallback to CPU if GPU failed
                         if device != 'cpu':
-                            self.logger.warning("GPU segmentation failed, trying CPU fallback...")
-                            cmd_cpu = cmd.copy()
-                            cmd_cpu[cmd_cpu.index('-d') + 1] = 'cpu'
-                            env_cpu = env.copy()
-                            env_cpu.pop('CUDA_VISIBLE_DEVICES', None)  # Remove GPU restriction
-                            env_cpu['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU
-                            
-                            result = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=1800, env=env_cpu)
-                            if result.returncode != 0:
-                                self.logger.error(f"CPU fallback also failed: {result.stderr}")
-                                raise RuntimeError(f"TotalSegmentator failed on both GPU and CPU: {result.stderr}")
+                            if self.segmentation_config.get('allow_cpu_fallback', True):
+                                self.logger.warning("GPU segmentation failed, trying CPU fallback...")
+                                cmd_cpu = cmd.copy()
+                                cmd_cpu[cmd_cpu.index('-d') + 1] = 'cpu'
+                                env_cpu = env.copy()
+                                env_cpu.pop('CUDA_VISIBLE_DEVICES', None)  # Remove GPU restriction
+                                env_cpu['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU
+                                
+                                result = subprocess.run(cmd_cpu, capture_output=True, text=True, timeout=1800, env=env_cpu)
+                                if result.returncode != 0:
+                                    self.logger.error(f"CPU fallback also failed: {result.stderr}")
+                                    raise RuntimeError(f"TotalSegmentator failed on both GPU and CPU: {result.stderr}")
+                                else:
+                                    self.logger.info("CPU fallback succeeded")
                             else:
-                                self.logger.info("CPU fallback succeeded")
+                                raise RuntimeError(f"TotalSegmentator failed on GPU (CPU fallback disabled): {result.stderr}")
                         else:
                             raise RuntimeError(f"TotalSegmentator failed: {result.stderr}")
                 except subprocess.TimeoutExpired:
@@ -285,12 +314,43 @@ class LungPreprocessor(BasePreprocessor):
                     'aorta': 'aorta',
                     'trachea': 'trachea'
                 }
+                if cache_root is not None:
+                    cache_paths = {
+                        seg_name: cache_root / f"{seg_name}.nrrd"
+                        for seg_name in mapping.keys()
+                    }
+                    if all(path.exists() for path in cache_paths.values()):
+                        self.logger.info("Using cached segmentations from %s", cache_root)
+                        for seg_name, organ_name in mapping.items():
+                            mask = sitk.ReadImage(str(cache_paths[seg_name]))
+                            mask = self._resample_to_reference(mask, ct_image)
+                            lung_masks[organ_name] = mask
+                        if {'left_upper_lobe', 'left_lower_lobe'}.issubset(lung_masks):
+                            combined = self._combine_lung_masks(lung_masks['left_upper_lobe'],
+                                                                lung_masks['left_lower_lobe'])
+                            lung_masks['left_lung'] = self._resample_to_reference(combined, ct_image)
+                        if {'right_upper_lobe', 'right_middle_lobe', 'right_lower_lobe'}.issubset(lung_masks):
+                            combined = self._combine_lung_masks(lung_masks['right_upper_lobe'],
+                                                                lung_masks['right_middle_lobe'],
+                                                                lung_masks['right_lower_lobe'])
+                            lung_masks['right_lung'] = self._resample_to_reference(combined, ct_image)
+
+                        required_masks = ['left_lung', 'right_lung']
+                        if not all(mask in lung_masks for mask in required_masks):
+                            missing = [mask for mask in required_masks if mask not in lung_masks]
+                            raise RuntimeError(f"Missing required lung masks after cached segmentation: {missing}")
+                        return lung_masks
                 for seg_name, organ_name in mapping.items():
                     seg_path = temp_output_path / f"{seg_name}.nii.gz"
                     if seg_path.exists():
                         mask = sitk.ReadImage(str(seg_path))
                         mask = self._resample_to_reference(mask, ct_image)
                         lung_masks[organ_name] = mask
+                        if cache_root is not None:
+                            try:
+                                sitk.WriteImage(mask, str(cache_root / f"{seg_name}.nrrd"))
+                            except Exception as exc:
+                                self.logger.warning("Failed to cache segmentation %s: %s", seg_name, exc)
                     else:
                         self.logger.warning(f"Organ segmentation missing: {seg_path}")
                 
@@ -523,8 +583,8 @@ class LungPreprocessor(BasePreprocessor):
     # ------------------------------------------------------------------
     def _extract_patches_from_organ(self, ct_image: sitk.Image, dose_image: sitk.Image,
                                     organ_mask: sitk.Image, organ_name: str):
-        ct_array = sitk.GetArrayFromImage(ct_image)
-        dose_array = sitk.GetArrayFromImage(dose_image)
+        ct_array = sitk.GetArrayFromImage(ct_image).astype(np.float32)
+        dose_array = sitk.GetArrayFromImage(dose_image).astype(np.float32)
         mask_array = sitk.GetArrayFromImage(organ_mask)
         
         coords = np.where(mask_array > 0)
@@ -699,26 +759,20 @@ class LungPreprocessor(BasePreprocessor):
                         significant_lobes = [best_lobe]
                     composite_label = '+'.join(sorted(significant_lobes))
 
+                    dose_view = dose_array[
+                        z_start:z_start + patch_size,
+                        y_start:y_start + patch_size,
+                        x_start:x_start + patch_size
+                    ]
+
                     side_type = 'ipsilateral' if LOBE_TO_SIDE.get(best_lobe, 'unknown') == ipsi_side else 'contralateral'
                     bucket = patches_data[side_type][best_lobe]
                     if self.max_patches_per_lobe and len(bucket) >= self.max_patches_per_lobe:
                         continue
 
-                    ct_patch = ct_array[
-                        z_start:z_start + patch_size,
-                        y_start:y_start + patch_size,
-                        x_start:x_start + patch_size
-                    ].copy()
-                    dose_patch = dose_array[
-                        z_start:z_start + patch_size,
-                        y_start:y_start + patch_size,
-                        x_start:x_start + patch_size
-                    ].copy()
-
                     bucket.append({
-                        'ct_patch': ct_patch,
-                        'dose_patch': dose_patch,
                         'start_coords': [z_start, y_start, x_start],
+                        'coordinates': [z_start, y_start, x_start],
                         'spatial_coord': [hash(patient_id) % 1_000_000, y_start, x_start, z_start],
                         'center_coords': [
                             x_start + patch_size // 2,
@@ -729,10 +783,10 @@ class LungPreprocessor(BasePreprocessor):
                         'lobe_name': best_lobe,
                         'side_type': side_type,
                         'anatomical_side': LOBE_TO_SIDE.get(best_lobe, 'unknown'),
-                        'dose_mean': float(np.mean(dose_patch)),
-                        'dose_max': float(np.max(dose_patch)),
-                        'dose_std': float(np.std(dose_patch)),
-                        'is_high_dose': bool(np.max(dose_patch) > 0.5),
+                        'dose_mean': float(np.mean(dose_view)),
+                        'dose_max': float(np.max(dose_view)),
+                        'dose_std': float(np.std(dose_view)),
+                        'is_high_dose': bool(np.max(dose_view) > 0.5),
                         'lobe_voxel_fraction': lobe_fractions.get(best_lobe, 0.0),
                         'lobe_patch_fraction': patch_fractions.get(best_lobe, 0.0),
                         'lobe_fractions': lobe_fractions,
@@ -754,6 +808,8 @@ class LungPreprocessor(BasePreprocessor):
             'total_contra_patches': total_contra,
             'lobes_with_patches': lobe_summary
         }
+        patches_data['ct_array'] = ct_array
+        patches_data['dose_array'] = dose_array
         return patches_data
     
     # ------------------------------------------------------------------
@@ -781,23 +837,64 @@ class LungPreprocessor(BasePreprocessor):
         if not patches_data:
             return str(output_dir)
 
+        if ct_image is None or patches_data.get('ct_array') is not None:
+            # Use stored arrays if provided, otherwise fall back to ct_image/dose_image.
+            ct_volume = patches_data.get('ct_array')
+            dose_volume = patches_data.get('dose_array')
+        else:
+            ct_volume = None
+            dose_volume = None
+
+        if ct_volume is None and ct_image is not None:
+            ct_volume = sitk.GetArrayFromImage(ct_image).astype(np.float32)
+        if dose_volume is None and dose_image is not None:
+            dose_volume = sitk.GetArrayFromImage(dose_image).astype(np.float32)
+
+        if ct_volume is None or dose_volume is None:
+            return str(output_dir)
+
+        patch_size = self.patch_size
+
         for side_key in ['ipsilateral', 'contralateral']:
             lobe_dict = patches_data.get(side_key, {})
             for lobe, patch_list in lobe_dict.items():
                 if not patch_list:
                     continue
                 best_patch = max(patch_list, key=lambda x: x.get('organ_ratio', 0))
-                ct_patch = np.array(best_patch['ct_patch'], dtype=np.float32)
-                dose_patch = np.array(best_patch['dose_patch'], dtype=np.float32)
+                z_start, y_start, x_start = [int(v) for v in best_patch.get('start_coords', (0, 0, 0))]
+
                 patch_dir = output_dir / f"{side_key}_{lobe}"
                 patch_dir.mkdir(parents=True, exist_ok=True)
 
-                ct_slice = self._central_slice(ct_patch)
-                dose_slice = self._central_slice(dose_patch)
+                overlay_slice = int(z_start + patch_size // 2)
+                overlay_slice = max(0, min(ct_volume.shape[0] - 1, overlay_slice))
+                base_slice = ct_volume[overlay_slice]
+
+                ct_patch = ct_volume[
+                    z_start:z_start + patch_size,
+                    y_start:y_start + patch_size,
+                    x_start:x_start + patch_size
+                ]
+                dose_patch = dose_volume[
+                    z_start:z_start + patch_size,
+                    y_start:y_start + patch_size,
+                    x_start:x_start + patch_size
+                ]
+                ct_slice = ct_patch[patch_size // 2]
+                dose_slice = dose_patch[patch_size // 2]
 
                 fig, ax = plt.subplots(1, 2, figsize=(8, 4))
-                ax[0].imshow(ct_slice, cmap='gray')
-                ax[0].set_title(f"{lobe} CT\nratio={best_patch.get('organ_ratio', 0):.2f}")
+                ax[0].imshow(base_slice, cmap='gray')
+                rect = patches.Rectangle(
+                    (x_start, y_start),
+                    patch_size,
+                    patch_size,
+                    linewidth=1.5,
+                    edgecolor='yellow',
+                    facecolor='none'
+                )
+                ax[0].add_patch(rect)
+                ax[0].set_title(f"{lobe} (slice {overlay_slice})\nratio={best_patch.get('organ_ratio', 0):.2f}")
                 ax[0].axis('off')
 
                 ax[1].imshow(ct_slice, cmap='gray')
@@ -876,10 +973,7 @@ class LungPreprocessor(BasePreprocessor):
     def _collect_patch_data_for_patient(self, patient_result: Dict[str, Any]) -> Dict[str, Any]:
         patches_data = patient_result.get('patches_data', {})
         patient_id = patient_result.get('patient_id', 'unknown')
-        ct_patches = []
-        dose_patches = []
-        spatial_coords = []
-        metadata = []
+        entries: List[Dict[str, Any]] = []
         ipsi_indices = []
         contra_indices = []
         lobe_mapping = {
@@ -893,36 +987,55 @@ class LungPreprocessor(BasePreprocessor):
                 continue
             for lobe_name, items in patches_data[side_type].items():
                 for patch in items:
-                    ct_patches.append(np.asarray(patch['ct_patch'], dtype=np.float32))
-                    dose_patches.append(np.asarray(patch['dose_patch'], dtype=np.float32))
-                    spatial_coords.append(np.array(patch['spatial_coord'], dtype=np.int64))
-                    entry = {
+                    start_coords = [int(v) for v in patch.get('start_coords', (0, 0, 0))]
+                    spatial_coord = np.array(patch.get('spatial_coord', [0, 0, 0, 0]), dtype=np.int64)
+                    entry_meta = {
                         k: self._to_serializable(v)
                         for k, v in patch.items()
-                        if k not in {'ct_patch', 'dose_patch'}
+                        if k not in {
+                            'start_coords',
+                            'spatial_coord',
+                            'composite_lobes',
+                            'lobe_fractions',
+                            'lobe_patch_fractions'
+                        }
                     }
-                    entry['patch_id'] = patch_idx
-                    entry['patient_id'] = patient_id
-                    metadata.append(entry)
+                    entry_meta['start_coords'] = start_coords
+                    entry_meta['coordinates'] = start_coords
+                    entry_meta['spatial_coord'] = spatial_coord.tolist()
+                    entry_meta['composite_lobes'] = patch.get('composite_lobes', [])
+                    entry_meta['lobe_fractions'] = self._to_serializable(patch.get('lobe_fractions', {}))
+                    entry_meta['lobe_patch_fractions'] = self._to_serializable(patch.get('lobe_patch_fractions', {}))
+                    entry_meta['side_type'] = side_type
+                    entry_meta['lobe_name'] = lobe_name
+                    entry_meta['patch_id'] = patch_idx
+                    entry_meta['patient_id'] = patient_id
+                    entries.append({
+                        'patch_id': patch_idx,
+                        'start_coords': start_coords,
+                        'spatial_coord': spatial_coord,
+                        'metadata': entry_meta,
+                        'side_type': side_type,
+                        'lobe_name': lobe_name
+                    })
                     if side_type == 'ipsilateral':
                         ipsi_indices.append(patch_idx)
                     else:
                         contra_indices.append(patch_idx)
                     lobe_mapping[side_type][lobe_name].append(patch_idx)
                     patch_idx += 1
-        if not ct_patches:
+        if not entries:
             return {}
         return {
-            'ct_patches': np.stack(ct_patches, axis=0).astype(np.float32),
-            'dose_patches': np.stack(dose_patches, axis=0).astype(np.float32),
-            'spatial_coords': np.stack(spatial_coords, axis=0),
-            'metadata': metadata,
+            'entries': entries,
             'ipsi_indices': ipsi_indices,
             'contra_indices': contra_indices,
             'lobe_mapping': lobe_mapping,
             'patient_summary': patches_data.get('summary', {}),
-            'patch_count': len(ct_patches),
-            'patient_id': patient_id
+            'patch_count': len(entries),
+            'patient_id': patient_id,
+            'ct_array': patches_data.get('ct_array'),
+            'dose_array': patches_data.get('dose_array')
         }
     
     def _save_patch_patient_cache(self, patient_result: Dict[str, Any],
@@ -933,17 +1046,71 @@ class LungPreprocessor(BasePreprocessor):
         cache_path = self._get_patch_cache_file(split_name, data['patient_id'], ensure_dir=True)
         import h5py
         import json
+        ct_array = data.get('ct_array')
+        dose_array = data.get('dose_array')
+        if ct_array is None and patient_result.get('ct_image') is not None:
+            ct_array = sitk.GetArrayFromImage(patient_result['ct_image']).astype(np.float32)
+        if dose_array is None and patient_result.get('dose_image') is not None:
+            dose_array = sitk.GetArrayFromImage(patient_result['dose_image']).astype(np.float32)
+        if ct_array is None or dose_array is None:
+            self.logger.warning("Skipping cache save for %s due to missing CT/dose arrays", data['patient_id'])
+            return
+
+        patch_size = self.patch_size
+        patch_count = data['patch_count']
+        if patch_count == 0:
+            return
+
+        spatial_coords = np.zeros((patch_count, 4), dtype=np.int64)
+        metadata_list: List[Dict[str, Any]] = []
+
         with h5py.File(cache_path, 'w') as f:
-            f.create_dataset('ct_patches', data=data['ct_patches'], compression='gzip', compression_opts=4)
-            f.create_dataset('dose_patches', data=data['dose_patches'], compression='gzip', compression_opts=4)
-            f.create_dataset('spatial_coords', data=data['spatial_coords'], compression='gzip', compression_opts=4)
+            ct_ds = f.create_dataset(
+                'ct_patches',
+                shape=(patch_count, patch_size, patch_size, patch_size),
+                dtype=np.float32,
+                chunks=(1, patch_size, patch_size, patch_size),
+                compression='gzip',
+                compression_opts=4
+            )
+            dose_ds = f.create_dataset(
+                'dose_patches',
+                shape=(patch_count, patch_size, patch_size, patch_size),
+                dtype=np.float32,
+                chunks=(1, patch_size, patch_size, patch_size),
+                compression='gzip',
+                compression_opts=4
+            )
+
+            for idx, entry in enumerate(data['entries']):
+                z_start, y_start, x_start = entry['start_coords']
+                ct_view = ct_array[
+                    z_start:z_start + patch_size,
+                    y_start:y_start + patch_size,
+                    x_start:x_start + patch_size
+                ]
+                dose_view = dose_array[
+                    z_start:z_start + patch_size,
+                    y_start:y_start + patch_size,
+                    x_start:x_start + patch_size
+                ]
+                ct_ds[idx] = np.asarray(ct_view, dtype=np.float32)
+                dose_ds[idx] = np.asarray(dose_view, dtype=np.float32)
+                spatial_coords[idx] = entry['spatial_coord']
+                metadata_list.append(entry['metadata'])
+
+            f.create_dataset('spatial_coords', data=spatial_coords, compression='gzip', compression_opts=4)
             f.create_dataset('ipsi_indices', data=np.array(data['ipsi_indices'], dtype=np.int64))
             f.create_dataset('contra_indices', data=np.array(data['contra_indices'], dtype=np.int64))
-            f.create_dataset('metadata', data=json.dumps(data['metadata'], indent=2).encode('utf-8'))
+            f.create_dataset('metadata', data=json.dumps(metadata_list, indent=2).encode('utf-8'))
             f.create_dataset('lobe_mapping', data=json.dumps(data['lobe_mapping'], indent=2).encode('utf-8'))
             f.create_dataset('patient_summary', data=json.dumps(data['patient_summary'], indent=2).encode('utf-8'))
             f.attrs['patient_id'] = data['patient_id']
-            f.attrs['patch_count'] = data['patch_count']
+            f.attrs['patch_count'] = patch_count
+
+        # Release large arrays to free memory
+        ct_array = None
+        dose_array = None
     
     def consolidate_patches_from_cache(self, split_name: Optional[str], patient_ids: List[str],
                                        output_path: str):
@@ -1162,7 +1329,11 @@ class LungPreprocessor(BasePreprocessor):
                        dose_path: str,
                        prescribed_dose: Optional[float] = None,
                        split_name: Optional[str] = None,
-                       experiment_type: Optional[str] = None) -> Dict[str, Any]:
+                       experiment_type: Optional[str] = None,
+                       *,
+                       retain_patch_arrays: bool = False,
+                       save_to_cache: bool = True,
+                       save_visualizations: bool = True) -> Dict[str, Any]:
         self.logger.info(f"Processing patient {patient_id}")
         
         # Force garbage collection at start
@@ -1183,7 +1354,7 @@ class LungPreprocessor(BasePreprocessor):
             # Force garbage collection before segmentation
             gc.collect()
             
-            lung_masks = self.segment_organs(ct_image)
+            lung_masks = self.segment_organs(ct_image, cache_dir=self.segmentation_cache_dir)
             
             # Force garbage collection after segmentation
             gc.collect()
@@ -1196,6 +1367,7 @@ class LungPreprocessor(BasePreprocessor):
                 resampled_masks[name] = self.resample_to_common_spacing(mask, self.target_spacing)
             lung_masks = resampled_masks
             
+            ct_image_hu = sitk.Image(ct_image)
             ct_image = self.apply_ct_preprocessing(ct_image)
             raw_dose_array = sitk.GetArrayFromImage(dose_image).astype(np.float32)
             dose_image, scale_info = self.normalize_dose(dose_image, prescribed_dose)
@@ -1219,6 +1391,47 @@ class LungPreprocessor(BasePreprocessor):
             
             patches_data = self.extract_patches(ct_image, dose_image, lung_masks, patient_id) if produce_patches else {}
             ct_for_patch_visuals = ct_image
+
+            synthetic_results: List[Dict[str, Any]] = []
+            if self.synthetic_augmentor:
+                base_prescription_scale = None
+                if isinstance(scale_info, dict):
+                    base_prescription_scale = scale_info.get('scale')
+                synthetic_candidates = self.synthetic_augmentor.generate(
+                    patient_id=patient_id,
+                    ct_image_hu=ct_image_hu,
+                    normalized_dose_image=dose_image,
+                    normalization_fn=self.normalize_dose,
+                    base_prescription=base_prescription_scale,
+                )
+                if synthetic_candidates:
+                    for synth in synthetic_candidates:
+                        synth_ct = sitk.Image(ct_image)
+                        synth_masks = {name: sitk.Image(mask) for name, mask in lung_masks.items()}
+                        if 'left_lung' in synth_masks and 'right_lung' in synth_masks:
+                            ipsi_s, contra_s = self._determine_ipsi_contra_lungs(
+                                synth_masks['left_lung'], synth_masks['right_lung'], synth['dose_image']
+                            )
+                            synth_masks['ipsi_lung'] = ipsi_s
+                            synth_masks['contra_lung'] = contra_s
+                        if produce_patches:
+                            synth_patches = self.extract_patches(
+                                synth_ct, synth['dose_image'], synth_masks, synth['patient_id']
+                            )
+                        else:
+                            synth_patches = {}
+                        synth_dose_array = sitk.GetArrayFromImage(synth['dose_image'])
+                        scale_val = float(synth.get('scale_info', {}).get('scale', 1.0))
+                        synth['ct_image'] = synth_ct
+                        synth['lung_masks'] = synth_masks
+                        synth['patches_data'] = synth_patches
+                        synth['ct_for_patch_visuals'] = synth_ct
+                        synth['dose_stats'] = {
+                            'raw_max': float(np.max(synth_dose_array) * scale_val),
+                            'normalized_max': float(np.max(synth_dose_array)),
+                            'scale_info': synth.get('scale_info', {}),
+                        }
+                        synthetic_results.append(synth)
             
             if produce_images:
                 resize_to = self.preproc_config.get('resize_to')
@@ -1230,6 +1443,13 @@ class LungPreprocessor(BasePreprocessor):
                     for name, mask in lung_masks.items():
                         resized_masks[name] = self.resize_image(mask, resize_to)
                     lung_masks = resized_masks
+                    for synth in synthetic_results:
+                        synth['ct_image'] = self.resize_image(synth['ct_image'], resize_to)
+                        synth['dose_image'] = self.resize_image(synth['dose_image'], resize_to)
+                        resized_synth_masks = {}
+                        for name, mask in synth['lung_masks'].items():
+                            resized_synth_masks[name] = self.resize_image(mask, resize_to)
+                        synth['lung_masks'] = resized_synth_masks
             
             image_split_dir = self._get_split_dir(split_name, kind='image', ensure=True)
             patch_split_dir = self._get_split_dir(split_name, kind='patch', ensure=produce_patches)
@@ -1240,6 +1460,18 @@ class LungPreprocessor(BasePreprocessor):
                 output_dir=image_split_dir,
                 dose_stats=dose_stats
             )
+
+            for synth in synthetic_results:
+                synth_viz = self.create_visualization(
+                    synth['ct_image'],
+                    synth['dose_image'],
+                    synth['lung_masks'],
+                    synth['patient_id'],
+                    synth['patches_data'] if produce_patches else {},
+                    output_dir=image_split_dir,
+                    dose_stats=synth.get('dose_stats')
+                )
+                synth['visualization_path'] = synth_viz
             
             results: Dict[str, Any] = {
                 'patient_id': patient_id,
@@ -1248,14 +1480,39 @@ class LungPreprocessor(BasePreprocessor):
                 'lung_masks': lung_masks,
                 'patches_data': patches_data if produce_patches else {},
                 'visualization_path': viz_path,
-                'prescribed_dose': prescribed_dose
+                'prescribed_dose': prescribed_dose,
+                'synthetic_results': synthetic_results
             }
             
             if produce_patches:
-                self._save_patch_patient_cache(results, split_name)
-                patient_viz_dir = patch_split_dir / patient_id
-                patient_viz_dir.mkdir(parents=True, exist_ok=True)
-                self.save_visualization_patches(patches_data, patient_id, patient_viz_dir, ct_for_patch_visuals)
+                patch_entries = [results] + synthetic_results
+                if save_to_cache:
+                    for entry in patch_entries:
+                        if entry.get('patches_data'):
+                            self._save_patch_patient_cache(entry, split_name)
+                if save_visualizations:
+                    for entry in patch_entries:
+                        patient_viz_dir = patch_split_dir / entry['patient_id']
+                        patient_viz_dir.mkdir(parents=True, exist_ok=True)
+                        viz_ct = entry.get('ct_for_patch_visuals', ct_for_patch_visuals)
+                        self.save_visualization_patches(
+                            entry.get('patches_data', {}),
+                            entry['patient_id'],
+                            patient_viz_dir,
+                            viz_ct
+                        )
+                if not retain_patch_arrays:
+                    for entry in patch_entries:
+                        pdata = entry.get('patches_data', {})
+                        if not pdata:
+                            continue
+                        pdata.pop('ct_array', None)
+                        pdata.pop('dose_array', None)
+                        for side_key in ['ipsilateral', 'contralateral']:
+                            lobe_dict = pdata.get(side_key, {})
+                            for lobe_name in list(lobe_dict.keys()):
+                                lobe_dict[lobe_name] = []
+                        entry.pop('ct_for_patch_visuals', None)
             
             if produce_images:
                 patient_dir = self._get_image_patient_dir(split_name, patient_id, ensure=True)
@@ -1264,6 +1521,22 @@ class LungPreprocessor(BasePreprocessor):
                 for organ_name, mask in lung_masks.items():
                     sitk.WriteImage(mask, str(patient_dir / f"{patient_id}_{organ_name}_mask.nrrd"))
                 results['output_dir'] = str(patient_dir)
+                for synth in synthetic_results:
+                    synth_dir = self._get_image_patient_dir(split_name, synth['patient_id'], ensure=True)
+                    sitk.WriteImage(
+                        synth['ct_image'],
+                        str(synth_dir / f"{synth['patient_id']}_ct_processed.nrrd")
+                    )
+                    sitk.WriteImage(
+                        synth['dose_image'],
+                        str(synth_dir / f"{synth['patient_id']}_dose_processed.nrrd")
+                    )
+                    for organ_name, mask in synth['lung_masks'].items():
+                        sitk.WriteImage(
+                            mask,
+                            str(synth_dir / f"{synth['patient_id']}_{organ_name}_mask.nrrd")
+                        )
+                    synth['output_dir'] = str(synth_dir)
             
             # Final garbage collection
             gc.collect()

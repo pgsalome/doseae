@@ -4,6 +4,7 @@ import os
 import wandb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import numpy as np
 from models import get_model
 from datasets.loaders import create_data_loaders
 from utils.clinical_metrics import ClinicalMetricsCalculator
@@ -19,6 +20,95 @@ def _set_nested(config: dict, path: str, value):
             current[key] = {}
         current = current[key]
     current[keys[-1]] = value
+
+
+def _get_training_value(config: dict, key: str, default=None):
+    """
+    Read a training hyperparameter, preferring the `training` block and falling
+    back to the legacy `hyperparameters` block.
+    """
+    training_cfg = config.get('training', {}) or {}
+    if key in training_cfg:
+        return training_cfg[key]
+    hyper_cfg = config.get('hyperparameters', {}) or {}
+    return hyper_cfg.get(key, default)
+
+
+def _set_training_value(config: dict, key: str, value):
+    """
+    Write a training hyperparameter, keeping both the `training` and
+    `hyperparameters` blocks (if present) in sync so downstream utilities that
+    expect either layout keep working.
+    """
+    training_cfg = config.setdefault('training', {})
+    if isinstance(training_cfg, dict):
+        training_cfg[key] = value
+    hyper_cfg = config.get('hyperparameters')
+    if isinstance(hyper_cfg, dict):
+        hyper_cfg[key] = value
+
+
+def _infer_model_channels(config: dict):
+    """
+    Ensure model.in_channels/output_channels exist by inferring them from the dataset block.
+    """
+    model_cfg = config.setdefault('model', {})
+    dataset_cfg = config.get('dataset', {}) or {}
+
+    input_channels = dataset_cfg.get('input_channels')
+    num_channels = None
+    if isinstance(input_channels, (list, tuple)):
+        num_channels = len(input_channels)
+    elif isinstance(input_channels, int):
+        num_channels = input_channels
+    elif isinstance(input_channels, str):
+        num_channels = 1
+
+    if num_channels is None:
+        num_channels = dataset_cfg.get('num_input_channels') or 1
+
+    model_cfg.setdefault('in_channels', num_channels)
+    model_cfg.setdefault('output_channels', dataset_cfg.get('output_channels', 1) or 1)
+
+
+_TARGET_KEYS = ("target", "dose", "dose_patches", "reconstruction_target", "image")
+
+
+def _resolve_target_tensor_from_dict(batch: dict, fallback: torch.Tensor, device) -> torch.Tensor:
+    """
+    Pick the first available tensor in the batch among standard keys; fallback to the provided tensor.
+    """
+    for key in _TARGET_KEYS:
+        value = batch.get(key)
+        if torch.is_tensor(value):
+            return value.to(device)
+    return fallback
+
+
+def _extract_prediction_tensor(outputs):
+    """
+    Return the primary tensor from model outputs (tensor/tuple/dict).
+    Mirrors the helper in scripts/train.py so Optuna trials handle dictionary
+    outputs.
+    """
+    if torch.is_tensor(outputs):
+        return outputs
+    if isinstance(outputs, dict):
+        for key in ('reconstruction', 'predicted_dose', 'dose', 'output', 'prediction'):
+            tensor = outputs.get(key)
+            if torch.is_tensor(tensor):
+                return tensor
+        for value in outputs.values():
+            tensor = _extract_prediction_tensor(value)
+            if tensor is not None:
+                return tensor
+        return None
+    if isinstance(outputs, (tuple, list)):
+        for item in outputs:
+            tensor = _extract_prediction_tensor(item)
+            if tensor is not None:
+                return tensor
+    return None
 
 
 def _suggest_value(trial, param_spec: dict):
@@ -51,6 +141,7 @@ def _suggest_value(trial, param_spec: dict):
 
 def apply_optuna_parameters(trial, base_config: dict) -> dict:
     config = copy.deepcopy(base_config)
+    config.setdefault('training', {})
     optuna_cfg = base_config.get('optuna', {})
     param_defs = optuna_cfg.get('parameters') or []
 
@@ -58,6 +149,7 @@ def apply_optuna_parameters(trial, base_config: dict) -> dict:
         # Fallback to legacy behaviour
         config = define_model_params(trial, base_config)
         config = define_training_params(trial, config)
+        _infer_model_channels(config)
         return config
 
     for spec in param_defs:
@@ -65,6 +157,8 @@ def apply_optuna_parameters(trial, base_config: dict) -> dict:
             raise KeyError("Optuna parameter definition missing 'name'")
         suggestion = _suggest_value(trial, spec)
         _set_nested(config, spec['name'], suggestion)
+
+    _infer_model_channels(config)
 
     return config
 
@@ -114,19 +208,16 @@ def define_training_params(trial, base_config):
     config = copy.deepcopy(base_config)
 
     # Learning rate
-    config['hyperparameters']['learning_rate'] = trial.suggest_float(
-        'learning_rate', 1e-5, 1e-2, log=True
-    )
+    lr = trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True)
+    _set_training_value(config, 'learning_rate', lr)
 
     # Batch size
-    config['hyperparameters']['batch_size'] = trial.suggest_categorical(
-        'batch_size', [4, 8, 16, 32]
-    )
+    batch_size = trial.suggest_categorical('batch_size', [4, 8, 16, 32])
+    _set_training_value(config, 'batch_size', batch_size)
 
     # Weight decay
-    config['hyperparameters']['weight_decay'] = trial.suggest_float(
-        'weight_decay', 1e-6, 1e-3, log=True
-    )
+    weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+    _set_training_value(config, 'weight_decay', weight_decay)
 
     # Optimizer
     config['training']['optimizer'] = trial.suggest_categorical(
@@ -170,42 +261,12 @@ def objective(trial, base_config, device):
         print(f"Model created: {type(model).__name__}")
         
         # Configure multi-GPU settings based on config
-        use_multi_gpu = config.get('training', {}).get('use_multi_gpu', True)
-        num_gpus_config = config.get('training', {}).get('num_gpus', 0)
         gpu_ids = config.get('training', {}).get('gpu_ids', [])
-        
-        if use_multi_gpu and torch.cuda.device_count() > 1:
-            # Determine number of GPUs to use
-            if num_gpus_config == 0:
-                # Auto-detect all available GPUs
-                num_gpus = torch.cuda.device_count()
-                gpu_ids = list(range(num_gpus))
-            else:
-                # Use specified number of GPUs
-                num_gpus = min(num_gpus_config, torch.cuda.device_count())
-                if gpu_ids:
-                    # Use specific GPU IDs
-                    gpu_ids = gpu_ids[:num_gpus]
-                else:
-                    # Use first N GPUs
-                    gpu_ids = list(range(num_gpus))
-            
-            print(f"Using {num_gpus} GPUs for training: {gpu_ids}")
-            
-            # Use DataParallel
-            model = torch.nn.DataParallel(model)
-            
-            # Update batch size to take advantage of multiple GPUs
-            original_batch_size = config['hyperparameters']['batch_size']
-            config['hyperparameters']['batch_size'] = original_batch_size * num_gpus
-            print(f"Increased batch size from {original_batch_size} to {config['hyperparameters']['batch_size']} for multi-GPU training")
-        else:
-            if not use_multi_gpu:
-                print("Multi-GPU disabled in config, using single GPU")
-            else:
-                print("Only 1 GPU available, using single GPU")
-            print("Using single GPU for training")
-        
+        available_gpus = torch.cuda.device_count()
+        if available_gpus > 1:
+            print(f"{available_gpus} GPUs detected, but Optuna trials force single-GPU execution to avoid sync issues.")
+        print("Using single GPU for training")
+
         # Move model to device
         model = model.to(device)
 
@@ -218,14 +279,6 @@ def objective(trial, base_config, device):
             'test': val_loader,
         }
         
-        # Optimize data loading for multi-GPU
-        if use_multi_gpu and torch.cuda.device_count() > 1:
-            # Increase number of workers for data loading
-            for loader_name in ['train', 'val', 'test']:
-                if loader_name in data_loaders and hasattr(data_loaders[loader_name], 'num_workers'):
-                    data_loaders[loader_name].num_workers = min(8, num_gpus * 2)
-                    print(f"Set {loader_name} loader workers to {data_loaders[loader_name].num_workers}")
-
         # Check if data_loaders is None or missing required keys
         if data_loaders is None:
             print("Error: Data loaders are None")
@@ -250,13 +303,25 @@ def objective(trial, base_config, device):
         # Training variables
         best_val_loss = float('inf')
         patience_counter = 0
-        patience = config['hyperparameters'].get('early_stopping_patience', 5)
+        patience = int(_get_training_value(config, 'early_stopping_patience', 5) or 5)
+        total_epochs = int(_get_training_value(config, 'epochs', 100) or 100)
+        optuna_output_dir = (
+            config.get('optuna_output_dir')
+            or config.get('optuna', {}).get('output_dir')
+            or config.get('output', {}).get('results_dir')
+            or "."
+        )
+        model_dir = os.path.join(optuna_output_dir, "models")
+        os.makedirs(model_dir, exist_ok=True)
+        model_path = os.path.join(model_dir, f"best_model_trial_{trial.number}.pth")
 
         # Set up optimizer
         optimizer_name = config['training']['optimizer']
+        learning_rate = _get_training_value(config, 'learning_rate', 1e-4) or 1e-4
+        weight_decay = _get_training_value(config, 'weight_decay', 0.0) or 0.0
         optimizer_params = {
-            'lr': config['hyperparameters']['learning_rate'],
-            'weight_decay': config['hyperparameters']['weight_decay']
+            'lr': learning_rate,
+            'weight_decay': weight_decay
         }
 
         if optimizer_name == 'adam':
@@ -278,7 +343,7 @@ def objective(trial, base_config, device):
             )
         elif scheduler_name == 'cosine_annealing':
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=config['hyperparameters'].get('epochs', 100)
+                optimizer, T_max=total_epochs
             )
 
         # Initialize wandb if enabled
@@ -313,14 +378,15 @@ def objective(trial, base_config, device):
         # Prepare clinical metrics calculator and frequency
         clinical_metrics_calculator = ClinicalMetricsCalculator(config)
         gamma_freq = config.get('loss_function', {}).get('gamma_calculation_frequency', 10)
+        beta_value = _get_training_value(config, 'beta', 1.0) or 1.0
 
         # Training loop
         import time
         start_time = time.time()
         
-        for epoch in range(config['hyperparameters']['epochs']):
+        for epoch in range(total_epochs):
             epoch_start = time.time()
-            print(f"\nTrial Epoch {epoch + 1}/{config['hyperparameters']['epochs']}")
+            print(f"\nTrial Epoch {epoch + 1}/{total_epochs}")
 
             # Initialize loss tracking for this epoch
             train_loss_components = {}
@@ -337,12 +403,19 @@ def objective(trial, base_config, device):
                     # Handle different dataset types
                     if isinstance(batch, dict):  # For DoseAEDataset
                         data = batch["image"].to(device)
-                        mask_tensor = batch.get("mask", None)
+                        target_tensor = _resolve_target_tensor_from_dict(batch, data, device)
+                        mask_tensor = batch.get("mask")
                         if mask_tensor is not None:
                             mask_tensor = mask_tensor.to(device)
                     else:  # For standard (input, target) dataset
-                        data, _ = batch
+                        data, target_tensor = batch
                         data = data.to(device)
+                        if torch.is_tensor(target_tensor):
+                            target_tensor = target_tensor.to(device)
+                        elif isinstance(target_tensor, dict):
+                            target_tensor = _resolve_target_tensor_from_dict(target_tensor, data, device)
+                        else:
+                            target_tensor = data
                         mask_tensor = None
 
                     # Training step
@@ -358,14 +431,14 @@ def objective(trial, base_config, device):
                             
                             if isinstance(loss_fn, (ClinicalLoss, AdvancedDoseLoss)):
                                 if isinstance(loss_fn, ClinicalLoss):
-                                    losses = loss_fn(recon, data, mask_tensor, epoch=epoch)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor, epoch=epoch)
                                 else:  # AdvancedDoseLoss
-                                    losses = loss_fn(recon, data, mask_tensor)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor)
                                 
                                 # Add KL divergence for VAE
                                 kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                                 kl_loss = kl_loss / data.size(0)
-                                beta = config['hyperparameters'].get('beta', 1.0)
+                                beta = beta_value
                                 losses['kl'] = kl_loss
                                 losses['kl_weighted'] = beta * kl_loss
                                 losses['total'] = losses['total'] + beta * kl_loss
@@ -383,8 +456,8 @@ def objective(trial, base_config, device):
                                 # Handle DataParallel model
                                 model_to_use = model.module if hasattr(model, 'module') else model
                                 loss_dict = model_to_use.get_losses(
-                                    data, recon, mu, logvar,
-                                    beta=config['hyperparameters'].get('beta', 1.0)
+                                    target_tensor, recon, mu, logvar,
+                                    beta=beta_value
                                 )
                                 loss = loss_dict['total_loss']
                                 for loss_name, loss_value in list(loss_dict.items()):
@@ -395,20 +468,19 @@ def objective(trial, base_config, device):
                             # Regular autoencoder (no VAE)
                             outputs = model(data)
 
-                            # Handle both tuple outputs and direct outputs
-                            if isinstance(outputs, tuple):
-                                recon = outputs[0]
-                            else:
-                                recon = outputs
+                            recon = _extract_prediction_tensor(outputs)
+                            if recon is None:
+                                print('Error: model outputs did not contain a tensor prediction')
+                                return float('inf')
 
                             # Apply non-negative constraint (ReLU)
                             recon = torch.relu(recon)
 
                             if isinstance(loss_fn, (ClinicalLoss, AdvancedDoseLoss)):
                                 if isinstance(loss_fn, ClinicalLoss):
-                                    losses = loss_fn(recon, data, mask_tensor, epoch=epoch)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor, epoch=epoch)
                                 else:  # AdvancedDoseLoss
-                                    losses = loss_fn(recon, data, mask_tensor)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor)
                                 loss = losses['total']
                                 for k, v in list(losses.items()):
                                     if k not in train_loss_components:
@@ -418,7 +490,7 @@ def objective(trial, base_config, device):
                                 train_loss_components['total_loss'] = train_loss_components.get('total_loss', 0.0) + losses['total'].item()
                             else:
                                 # Calculate MSE loss
-                                loss = torch.nn.functional.mse_loss(recon, data)
+                                loss = torch.nn.functional.mse_loss(recon, target_tensor)
                                 # Track MSE
                                 if 'mse_loss' not in train_loss_components:
                                     train_loss_components['mse_loss'] = 0.0
@@ -462,12 +534,19 @@ def objective(trial, base_config, device):
                         # Handle different dataset types
                         if isinstance(batch, dict):  # For DoseAEDataset
                             data = batch["image"].to(device)
-                            mask_tensor = batch.get("mask", None)
+                            target_tensor = _resolve_target_tensor_from_dict(batch, data, device)
+                            mask_tensor = batch.get("mask")
                             if mask_tensor is not None:
                                 mask_tensor = mask_tensor.to(device)
                         else:  # For standard (input, target) dataset
-                            data, _ = batch
+                            data, target_tensor = batch
                             data = data.to(device)
+                            if torch.is_tensor(target_tensor):
+                                target_tensor = target_tensor.to(device)
+                            elif isinstance(target_tensor, dict):
+                                target_tensor = _resolve_target_tensor_from_dict(target_tensor, data, device)
+                            else:
+                                target_tensor = data
                             mask_tensor = None
 
                         # Forward pass - handle different model types
@@ -479,14 +558,14 @@ def objective(trial, base_config, device):
                             
                             if isinstance(loss_fn, (ClinicalLoss, AdvancedDoseLoss)):
                                 if isinstance(loss_fn, ClinicalLoss):
-                                    losses = loss_fn(recon, data, mask_tensor, epoch=epoch)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor, epoch=epoch)
                                 else:  # AdvancedDoseLoss
-                                    losses = loss_fn(recon, data, mask_tensor)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor)
                                 
                                 # Add KL divergence for VAE
                                 kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
                                 kl_loss = kl_loss / data.size(0)
-                                beta = config['hyperparameters'].get('beta', 1.0)
+                                beta = beta_value
                                 losses['kl'] = kl_loss
                                 losses['kl_weighted'] = beta * kl_loss
                                 losses['total'] = losses['total'] + beta * kl_loss
@@ -501,8 +580,8 @@ def objective(trial, base_config, device):
                                 # Handle DataParallel model
                                 model_to_use = model.module if hasattr(model, 'module') else model
                                 loss_dict = model_to_use.get_losses(
-                                    data, recon, mu, logvar,
-                                    beta=config['hyperparameters'].get('beta', 1.0)
+                                    target_tensor, recon, mu, logvar,
+                                    beta=beta_value
                                 )
                                 for loss_name, loss_value in list(loss_dict.items()):
                                     if loss_name not in val_loss_components:
@@ -512,20 +591,19 @@ def objective(trial, base_config, device):
                             # Regular autoencoder (no VAE)
                             outputs = model(data)
 
-                            # Handle both tuple outputs and direct outputs
-                            if isinstance(outputs, tuple):
-                                recon = outputs[0]
-                            else:
-                                recon = outputs
+                            recon = _extract_prediction_tensor(outputs)
+                            if recon is None:
+                                print('Error: model outputs did not contain a tensor prediction (val)')
+                                return float('inf')
 
                             # Apply non-negative constraint (ReLU)
                             recon = torch.relu(recon)
 
                             if isinstance(loss_fn, (ClinicalLoss, AdvancedDoseLoss)):
                                 if isinstance(loss_fn, ClinicalLoss):
-                                    losses = loss_fn(recon, data, mask_tensor, epoch=epoch)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor, epoch=epoch)
                                 else:  # AdvancedDoseLoss
-                                    losses = loss_fn(recon, data, mask_tensor)
+                                    losses = loss_fn(recon, target_tensor, mask_tensor)
                                 for k, v in list(losses.items()):
                                     if k not in val_loss_components:
                                         val_loss_components[k] = 0.0
@@ -534,7 +612,7 @@ def objective(trial, base_config, device):
                                 val_loss_components['total_loss'] = val_loss_components.get('total_loss', 0.0) + losses['total'].item()
                             else:
                                 # Calculate MSE loss
-                                loss = torch.nn.functional.mse_loss(recon, data)
+                                loss = torch.nn.functional.mse_loss(recon, target_tensor)
                                 # Track MSE
                                 if 'mse_loss' not in val_loss_components:
                                     val_loss_components['mse_loss'] = 0.0
@@ -562,25 +640,36 @@ def objective(trial, base_config, device):
 
                     if isinstance(batch_sample, dict):
                         val_data = batch_sample.get("image").to(device)
+                        val_target = _resolve_target_tensor_from_dict(batch_sample, val_data, device)
                         val_mask = batch_sample.get("mask")
                         if val_mask is not None:
                             val_mask = val_mask.to(device)
                     else:
-                        val_data, _ = batch_sample
+                        val_data, val_target = batch_sample
                         val_data = val_data.to(device)
+                        if torch.is_tensor(val_target):
+                            val_target = val_target.to(device)
+                        elif isinstance(val_target, dict):
+                            val_target = _resolve_target_tensor_from_dict(val_target, val_data, device)
+                        else:
+                            val_target = val_data
                         val_mask = None
 
                     if val_data.ndim == 3:
                         val_data = val_data.unsqueeze(1)
+                    if val_target.ndim == 3:
+                        val_target = val_target.unsqueeze(1)
 
                     with torch.no_grad():
                         if model_type == 'vae':
                             val_recon, _, _ = model(val_data)
                         else:
                             out_dbg = model(val_data)
-                            val_recon = out_dbg[0] if isinstance(out_dbg, tuple) else out_dbg
+                            val_recon = _extract_prediction_tensor(out_dbg)
+                            if val_recon is None:
+                                raise ValueError('Unable to extract prediction tensor for clinical metrics')
 
-                    target_np = val_data[0, 0].detach().cpu().numpy()
+                    target_np = val_target[0, 0].detach().cpu().numpy()
                     pred_np = val_recon[0, 0].detach().cpu().numpy()
                     mask_np = val_mask[0].detach().cpu().numpy() if val_mask is not None else None
 
@@ -654,38 +743,65 @@ def objective(trial, base_config, device):
                     val_iter_vis = iter(data_loaders['val'])
                     batch_vis = next(val_iter_vis)
 
-                    # Extract tensor
+                    # Extract tensors for visualization
                     if isinstance(batch_vis, dict):
-                        vis_data = batch_vis.get("image").to(device)
-                    else:
-                        vis_data, _ = batch_vis
+                        vis_data = batch_vis.get("image")
+                        if vis_data is None:
+                            for value in batch_vis.values():
+                                if torch.is_tensor(value):
+                                    vis_data = value
+                                    break
+                        if vis_data is None:
+                            raise ValueError("Validation batch did not contain a tensor input")
                         vis_data = vis_data.to(device)
+                        vis_target = _resolve_target_tensor_from_dict(batch_vis, vis_data, device)
+                    else:
+                        vis_data, vis_target = batch_vis
+                        vis_data = vis_data.to(device)
+                        if torch.is_tensor(vis_target):
+                            vis_target = vis_target.to(device)
+                        elif isinstance(vis_target, dict):
+                            vis_target = _resolve_target_tensor_from_dict(vis_target, vis_data, device)
+                        else:
+                            vis_target = vis_data
 
-                    # Ensure channel dimension
+                    if not torch.is_tensor(vis_target):
+                        vis_target = vis_data
+
+                    # Ensure channel dimension exists
                     if vis_data.ndim == 3:
                         vis_data = vis_data.unsqueeze(1)
 
-                    # Use first item consistently
                     with torch.no_grad():
-                        out_vis = model(vis_data)
-                        vis_recon = out_vis[0] if isinstance(out_vis, tuple) else out_vis
+                        outputs_vis = model(vis_data)
+                    vis_recon = _extract_prediction_tensor(outputs_vis)
+                    if vis_recon is None:
+                        raise ValueError("Model outputs did not include a tensor prediction")
 
-                    # Middle slice selection
-                    if vis_data.dim() == 5:  # [B, C, D, H, W]
-                        depth = vis_data.size(2)
-                        mid = depth // 2
-                        input_slice = vis_data[0, 0, mid].detach().cpu().numpy()
-                        recon_slice = vis_recon[0, 0, mid].detach().cpu().numpy()
-                    else:  # [B, C, H, W]
-                        input_slice = vis_data[0, 0].detach().cpu().numpy()
-                        recon_slice = vis_recon[0, 0].detach().cpu().numpy()
+                    def _collapse_to_volume(tensor: torch.Tensor) -> np.ndarray:
+                        arr = tensor.detach().cpu().float().numpy()
+                        while arr.ndim > 3:
+                            arr = arr[0]
+                        return np.squeeze(arr)
 
-                    diff = (abs(input_slice - recon_slice))
+                    recon_np = _collapse_to_volume(vis_recon)
+                    target_np = _collapse_to_volume(vis_target)
 
-                    # Build figure with 3 panels
+                    if recon_np.ndim == 3 and target_np.ndim == 3:
+                        mid = recon_np.shape[0] // 2
+                        recon_slice = recon_np[mid]
+                        target_slice = target_np[mid]
+                    elif recon_np.ndim == 2 and target_np.ndim == 2:
+                        recon_slice = recon_np
+                        target_slice = target_np
+                    else:
+                        raise ValueError(f"Unexpected slice shapes: recon {recon_np.shape}, target {target_np.shape}")
+
+                    diff_slice = np.abs(target_slice - recon_slice)
+
                     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-                    im1 = axes[0].imshow(input_slice, cmap='viridis')
-                    axes[0].set_title('Input (middle)')
+                    im1 = axes[0].imshow(target_slice, cmap='viridis')
+                    axes[0].set_title('Target (middle)')
                     axes[0].axis('off')
                     plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
 
@@ -694,13 +810,13 @@ def objective(trial, base_config, device):
                     axes[1].axis('off')
                     plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
 
-                    im3 = axes[2].imshow(diff, cmap='magma')
+                    im3 = axes[2].imshow(diff_slice, cmap='magma')
                     axes[2].set_title('Abs Diff')
                     axes[2].axis('off')
                     plt.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
 
                     plt.tight_layout()
-                    wandb.log({'track/middle_slice': wandb.Image(fig)})
+                    wandb.log({'track/middle_slice': wandb.Image(fig)}, commit=False)
                     plt.close(fig)
                 except Exception as track_e:
                     print(f"    Tracking middle slice logging error: {track_e}")
@@ -716,6 +832,14 @@ def objective(trial, base_config, device):
                 best_val_loss = avg_val_total
                 patience_counter = 0
                 print(f"    Validation loss improved to {best_val_loss:.6f}")
+                try:
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    torch.save(model_to_save.state_dict(), model_path)
+                    if config.get('wandb', {}).get('use_wandb', False):
+                        wandb.save(model_path)
+                    print(f"    Saved best model: {model_path}")
+                except Exception as e:
+                    print(f"    Warning: Could not save model: {e}")
             else:
                 patience_counter += 1
                 print(f"    No improvement for {patience_counter} epochs")
@@ -726,16 +850,16 @@ def objective(trial, base_config, device):
         # Clean up
         total_time = time.time() - start_time
         print(f"\nTrial {trial.number} completed in {total_time:.2f}s ({total_time/60:.1f} minutes)")
-        print(f"Average time per epoch: {total_time/config['hyperparameters']['epochs']:.2f}s")
+        epoch_denom = max(total_epochs, 1)
+        print(f"Average time per epoch: {total_time/epoch_denom:.2f}s")
         
-        # Save best model
-        if config['wandb']['use_wandb']:
+        # Ensure a final best model is present even if no improvement was logged
+        if not os.path.exists(model_path):
             try:
-                # Save model state dict (handle DataParallel)
-                model_path = f"best_model_trial_{trial.number}.pth"
                 model_to_save = model.module if hasattr(model, 'module') else model
                 torch.save(model_to_save.state_dict(), model_path)
-                wandb.save(model_path)
+                if config.get('wandb', {}).get('use_wandb', False):
+                    wandb.save(model_path)
                 print(f"Saved best model: {model_path}")
             except Exception as e:
                 print(f"Warning: Could not save model: {e}")

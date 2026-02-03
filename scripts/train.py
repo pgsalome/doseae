@@ -4,6 +4,7 @@ Main training script for dose autoencoder.
 """
 
 import argparse
+import json
 import yaml
 import torch
 from torch.utils.data import DataLoader
@@ -28,10 +29,13 @@ try:
 except ImportError:  # pragma: no cover
     ClinicalMetricsCalculator = None
 
-from datasets.loaders import create_data_loaders
+from datasets.loaders import create_data_loaders, create_dataset, collate_medical_batch, _LimitedDataset
 from models import get_model
 from core.training.trainer import Trainer
-from core.optimization.neptune_optimizer import NeptuneOptimizer
+try:
+    from core.optimization.neptune_optimizer import NeptuneOptimizer
+except ImportError:  # pragma: no cover
+    NeptuneOptimizer = None
 
 
 def setup_logging(log_level: str = 'INFO'):
@@ -181,57 +185,6 @@ def compute_validation_clinical_metrics(model, val_loader, config: dict, device)
     return metrics
 
 
-def log_wandb_validation_sample(model, val_loader, device, config: dict):
-    """Log a validation sample (prediction vs target) to WandB."""
-    if wandb is None or wandb.run is None:
-        return
-    if not config.get('wandb', {}).get('log_validation_sample', True):
-        return
-
-    try:
-        batch = next(iter(val_loader))
-    except StopIteration:
-        return
-
-    batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-
-    with torch.no_grad():
-        input_tensor = batch.get('input') or batch.get('ct') or batch.get('ct_patches') or batch.get('dose')
-        if input_tensor is None:
-            return
-        try:
-            outputs = model(input_tensor, **batch)
-        except TypeError:
-            outputs = model(input_tensor)
-
-    prediction = _extract_prediction_tensor(outputs)
-
-    target = batch.get('dose') or batch.get('target') or batch.get('dose_patches')
-    if prediction is None or target is None:
-        return
-
-    pred_np = np.squeeze(prediction.detach().cpu().numpy())
-    target_np = np.squeeze(target.detach().cpu().numpy())
-
-    if pred_np.ndim == 3:
-        idx = pred_np.shape[0] // 2
-        pred_slice = pred_np[idx]
-        target_slice = target_np[idx]
-    elif pred_np.ndim == 2:
-        pred_slice = pred_np
-        target_slice = target_np
-    else:
-        return
-
-    diff_slice = pred_slice - target_slice
-
-    wandb.log({
-        'val/prediction': wandb.Image(pred_slice, caption='Predicted Dose (central slice)'),
-        'val/target': wandb.Image(target_slice, caption='Target Dose (central slice)'),
-        'val/difference': wandb.Image(diff_slice, caption='Prediction - Target')
-    })
-
-
 def create_model(config: dict, entity_type: str):
     """Create model based on entity type and configuration."""
     model_cfg = config.setdefault('model', {})
@@ -265,6 +218,11 @@ def train_model(config: dict, entity_type: str, data_dir: str):
     # Create data loaders
     logger.info("Creating data loaders...")
     train_loader, val_loader = create_data_loaders(config, entity_type, data_dir)
+    try:
+        logger.info("Train loader batches: %d, batch size: %d", len(train_loader), train_loader.batch_size)
+        logger.info("Val loader batches: %d, batch size: %d", len(val_loader), val_loader.batch_size)
+    except Exception:
+        logger.info("Batch size reporting failed (custom loader).")
     
     # Create model
     logger.info("Creating model...")
@@ -310,10 +268,71 @@ def train_model(config: dict, entity_type: str, data_dir: str):
             if log_payload:
                 wandb.log(log_payload)
 
-    log_wandb_validation_sample(trainer.model, val_loader, trainer.device, config)
+    # Evaluate on test set using the best checkpoint
+    batch_size = config.get('training', {}).get('batch_size', 1)
+    dataset_cfg = config.get('dataset', {})
+    num_workers = dataset_cfg.get('num_workers', config.get('data', {}).get('num_workers', 0))
+    pin_memory = bool(dataset_cfg.get('pin_memory', False))
+
+    logger.info("Preparing test loader...")
+    test_dataset = create_dataset(config, entity_type, 'test', data_dir, transform=None, apply_transforms=False)
+    if dataset_cfg.get('test_mode', False):
+        limit_batches = int(dataset_cfg.get('n_test_samples', dataset_cfg.get('n_test_batches', 20)))
+        if limit_batches > 0:
+            limit_samples = limit_batches * batch_size
+            logger.info(
+                "Test mode enabled: restricting test dataset to %d batches (%d samples)",
+                limit_batches,
+                limit_samples,
+            )
+            test_dataset = _LimitedDataset(test_dataset, limit_samples)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=getattr(test_dataset, 'collate_fn', None) or collate_medical_batch,
+    )
+
+    if trainer.best_checkpoint_path is not None:
+        logger.info(f"Loading best checkpoint from {trainer.best_checkpoint_path}")
+        trainer.load_checkpoint(str(trainer.best_checkpoint_path))
+    else:
+        logger.warning("No best checkpoint recorded; proceeding with current model weights for test evaluation.")
+
+    logger.info("Evaluating on test set...")
+    test_results = trainer.evaluate_testset(test_loader)
+    training_history['test_metrics'] = test_results
+
+    test_metrics_file = results_path / 'test_metrics.json'
+    with open(test_metrics_file, 'w') as f:
+        json.dump(test_results, f, indent=2)
+    logger.info(f"Test metrics saved to {test_metrics_file}")
+
+    if wandb is not None and wandb.run is not None:
+        wandb_log = {'test/num_samples': test_results.get('num_samples', 0)}
+
+        table = wandb.Table(columns=["segmentation", "metric", "statistic", "value"])
+
+        def add_rows(segmentation: str, stats: dict):
+            if not stats:
+                return
+            for metric, summary in stats.items():
+                for stat_name, value in summary.items():
+                    table.add_data(segmentation, metric, stat_name, value)
+
+        add_rows("overall", test_results.get('overall', {}))
+        for lobe, metrics in test_results.get('per_lobe', {}).items():
+            add_rows(f"lobe:{lobe}", metrics)
+        for side, metrics in test_results.get('per_side', {}).items():
+            add_rows(f"side:{side}", metrics)
+
+        wandb_log['test/metrics_table'] = table
+        wandb.log(wandb_log, commit=True)
+        wandb.finish()
 
     # Save training history
-    import json
     history_file = results_path / 'training_history.json'
     with open(history_file, 'w') as f:
         json.dump(training_history, f, indent=2)
@@ -326,6 +345,11 @@ def train_model(config: dict, entity_type: str, data_dir: str):
 def optimize_hyperparameters(config: dict, entity_type: str, data_dir: str):
     """Run hyperparameter optimization."""
     logger = logging.getLogger(__name__)
+
+    if NeptuneOptimizer is None:
+        raise ImportError(
+            "Neptune is not installed. Please install the 'neptune' package to use optimization mode."
+        )
 
     prepare_wandb_metadata(config, entity_type)
 
@@ -351,7 +375,6 @@ def optimize_hyperparameters(config: dict, entity_type: str, data_dir: str):
     results = optimizer.optimize(model_factory, train_loader, val_loader)
     
     # Save results
-    import json
     results_file = output_path / 'optimization_results.json'
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
@@ -383,6 +406,18 @@ def main():
     # Load configuration
     logger.info(f"Loading configuration from {args.config}")
     config = load_config(args.config)
+
+    # Set NumExpr thread limit from config (must be done before any NumExpr operations)
+    training_cfg = config.get('training', {})
+    numexpr_threads = training_cfg.get('numexpr_max_threads')
+    if numexpr_threads is not None and numexpr_threads > 0:
+        os.environ['NUMEXPR_MAX_THREADS'] = str(numexpr_threads)
+        logger.info(f"Set NUMEXPR_MAX_THREADS to {numexpr_threads}")
+    else:
+        # Default to all available cores if not specified or set to 0/None
+        cpu_count = os.cpu_count() or 32
+        os.environ['NUMEXPR_MAX_THREADS'] = str(cpu_count)
+        logger.info(f"NUMEXPR_MAX_THREADS not specified in config, using all available cores: {cpu_count}")
 
     # Optionally merge preprocessing config for training/preprocessing parity
     if 'preprocessing_config' in config:

@@ -7,6 +7,7 @@ import numpy as np
 from datetime import datetime
 import glob
 import pandas as pd
+from pathlib import Path
 
 # Import Optuna for Bayesian optimization
 import optuna
@@ -15,12 +16,65 @@ from optuna.trial import Trial
 # Import wandb for experiment tracking
 import wandb
 
+from utils.optimization import objective, apply_optuna_parameters
+
+# Resolve project root and default configs
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_BASE_CONFIG = PROJECT_ROOT / "config" / "training_patches_05mm.yaml"
+
 # Set wandb directory
 os.environ["WANDB_DIR"] = "/data/pgsal/wandb_doseae"
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run Optuna-based hyperparameter optimization for DoseAE configs"
+    )
+    parser.add_argument(
+        "--base_config",
+        default=str(DEFAULT_BASE_CONFIG),
+        help="Path to base YAML/JSON configuration file (default: training_patches_05mm.yaml)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="./optuna_runs",
+        help="Directory where per-trial configurations are stored",
+    )
+    parser.add_argument(
+        "--results_file",
+        default="./optuna_results.csv",
+        help="CSV file to append trial results",
+    )
+    parser.add_argument(
+        "--n_trials",
+        type=int,
+        default=None,
+        help="Number of trials to run (overrides config)",
+    )
+    parser.add_argument(
+        "--start_trial",
+        type=int,
+        default=None,
+        help="Trial index to resume from. Auto-detect if omitted.",
+    )
+    parser.add_argument(
+        "--random_seed",
+        type=int,
+        default=None,
+        help="Random seed for the TPE sampler (overrides config)",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Force device string (e.g., 'cuda', 'cpu'). Defaults to auto-detect.",
+    )
+    return parser.parse_args()
+
+
 def ensure_dir(directory):
     """Ensure directory exists."""
+    if not directory:
+        return
     os.makedirs(directory, exist_ok=True)
 
 
@@ -46,6 +100,16 @@ def update_config_with_params(base_config, param_dict):
             current = current[key]
         current[keys[-1]] = param_value
     return config
+
+
+def _get_nested(config: dict, path: str):
+    keys = path.split('.')
+    current = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
 
 
 def define_study_params(trial):
@@ -108,7 +172,15 @@ def find_last_completed_trial(output_dir):
     return max_trial
 
 
-def run_optimization(base_config, output_dir, start_trial=0, n_trials=20, random_seed=42, results_file=None):
+def run_optimization(
+    base_config,
+    output_dir,
+    start_trial=0,
+    n_trials=20,
+    random_seed=42,
+    results_file=None,
+    device_override=None,
+):
     """Run Bayesian optimization for hyperparameter tuning."""
     ensure_dir(output_dir)
     if results_file:
@@ -136,22 +208,20 @@ def run_optimization(base_config, output_dir, start_trial=0, n_trials=20, random
 
     # Get device
     import torch
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device_override:
+        device = torch.device(device_override)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # Run trials
     for trial_num in range(start_trial, n_trials):
-        # Create a trial
         trial = optuna.trial.Trial(study, study._storage.create_new_trial(study._study_id))
         print(f"\nTrial {trial_num}/{n_trials - 1}")
 
-        # Get parameters
-        params = define_study_params(trial)
-        print(f"Parameters: {params}")
-
-        # Create config
-        config = update_config_with_params(base_config, params)
+        config = apply_optuna_parameters(trial, base_config)
         config["trial_num"] = trial_num
+        config["optuna_output_dir"] = output_dir
 
         # Set up wandb
         if "wandb" in config and config["wandb"].get("use_wandb", False):
@@ -167,9 +237,17 @@ def run_optimization(base_config, output_dir, start_trial=0, n_trials=20, random
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2, cls=NumpyEncoder)
 
+        # Snapshot parameter values for logging
+        params = {}
+        optuna_defs = base_config.get('optuna', {}).get('parameters', [])
+        for spec in optuna_defs:
+            name = spec.get('name')
+            if not name:
+                continue
+            params[name] = _get_nested(config, name)
+
         try:
             # Run objective function
-            from utils.optimization import objective
             val_loss = objective(trial, config, device)
 
             # Record results
@@ -253,40 +331,39 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run optimization experiments (single-arg: base config)")
-    parser.add_argument("--base_config", default="config/config.yaml", type=str, help="Path to base config file")
-    args = parser.parse_args()
+    args = parse_args()
 
-    # Load base configuration
     base_config = load_config(args.base_config)
 
-    # Read settings from config
-    optuna_cfg = base_config.get('optuna', {})
-    training_cfg = base_config.get('training', {})
+    optuna_cfg = base_config.get("optuna", {})
+    training_cfg = base_config.get("training", {})
 
-    n_trials = int(optuna_cfg.get('n_trials', 100))
-    random_seed = int(optuna_cfg.get('seed', training_cfg.get('seed', 42)))
-    output_dir = optuna_cfg.get('configs_dir', './config/bayesian_opt_patches')
-    results_file = optuna_cfg.get('results_file', './results/bayesian_opt_results_image.csv')
-    start_trial_cfg = optuna_cfg.get('start_trial', None)
+    n_trials = args.n_trials or int(optuna_cfg.get("n_trials", 100))
+    random_seed = args.random_seed or int(optuna_cfg.get("seed", training_cfg.get("seed", 42)))
 
-    # Determine start trial
-    if start_trial_cfg is not None:
-        start_trial = int(start_trial_cfg)
+    output_dir = args.output_dir or optuna_cfg.get("configs_dir", "./optuna_runs")
+    results_file = args.results_file or optuna_cfg.get("results_file", "./optuna_results.csv")
+
+    ensure_dir(output_dir)
+    if results_file:
+        ensure_dir(os.path.dirname(results_file))
+
+    if args.start_trial is not None:
+        start_trial = args.start_trial
     else:
         last_trial = find_last_completed_trial(output_dir)
         start_trial = last_trial + 1 if last_trial >= 0 else 0
 
     print(f"Starting from trial {start_trial} (total trials target: {n_trials})")
 
-    # Run optimization
     best_config, best_val_loss, results = run_optimization(
         base_config=base_config,
         output_dir=output_dir,
         start_trial=start_trial,
         n_trials=n_trials,
         random_seed=random_seed,
-        results_file=results_file
+        results_file=results_file,
+        device_override=args.device,
     )
 
     print("\nBayesian optimization completed.")
