@@ -840,9 +840,12 @@ def build_patch_batch(
 
         ct_tensor = torch.from_numpy(ct_patch).float().unsqueeze(0)
         dose_tensor = torch.from_numpy(dose_patch).float().unsqueeze(0)
-        input_tensor, _ = _assemble_input_tensor(
-            input_channels, ct_tensor, dose_tensor, fusion_cfg
-        )
+        input_tensor = assemble_input_tensor_batch(
+            input_channels,
+            ct_tensor.unsqueeze(0),
+            dose_tensor.unsqueeze(0),
+            fusion_cfg,
+        ).squeeze(0)
 
         input_tensors.append(input_tensor)
         ct_tensors.append(ct_tensor)
