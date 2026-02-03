@@ -1,0 +1,7 @@
+{
+  "timestamp": "20251107_170052",
+  "best_validation_loss": Infinity,
+  "best_parameters": null,
+  "total_trials": 20,
+  "resumed_from_trial": null
+}

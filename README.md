@@ -86,6 +86,41 @@ If you plan to use WandB or Neptune ensure the corresponding environment variabl
 
 ---
 
+### Synthetic Dose Augmentation (OpenTPS)
+
+DoseAE can synthesise additional treatment plans per patient by wrapping the [OpenTPS](https://gitlab.com/openmcsquare/opentps) photon planning toolkit.  This is optional and disabled by default.
+
+1. Install OpenTPS (either `pip install opentps` or clone into `external/OpenTPS` – the preprocessing script assumes the latter).
+2. Ensure `psutil` is available (`pip install psutil`) and that Collapse Cone convolution resources in OpenTPS can be executed on your system.
+3. Enable augmentation in the preprocessing config:
+   ```yaml
+   augmentation:
+     enable_synthetic_dose: true
+     synthetic_doses_per_patient: 3
+     opentps:
+       core_path: "external/OpenTPS/opentps_core"   # set if different
+       min_beams: 3
+       max_beams: 5
+       target_isodose_range: [0.75, 0.95]
+       prescription_scale_range: [0.9, 1.1]
+   ```
+4. Run `scripts/preprocess.py` as usual.  For every patient the pipeline will derive a high-dose target region from the normalised plan, randomise beam angles within the provided ranges, optimise a new fluence map with OpenTPS, and append the resulting dose volumes to the same split (IDs are suffixed with `_synthetic_##`).
+
+All caches, full-image exports, and HDF5 consolidation automatically include the augmented samples.  If augmentation cannot be initialised (e.g., OpenTPS missing), the preprocessing script logs a warning and continues with the original cohort.
+
+To generate clinically perturbed plans directly (without the rest of preprocessing), use:
+
+```bash
+python scripts/run_opentps_perturbations.py \
+    --config config/single_patient_synth.yaml \
+    --mapping data/ct_dose_file_mapping.json \
+    --patient_id 0617697905 \
+    --n_samples 3 \
+    --output_dir outputs/perturbations
+```
+
+---
+
 ## Training
 
 The entire training pipeline is handled by `scripts/train.py`.  The YAML config fully specifies dataset paths, model choices, clinical losses, logging, and optimisation ranges.

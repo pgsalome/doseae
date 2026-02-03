@@ -1,0 +1,236 @@
+{
+  "dataset": {
+    "dataset_type": "patches",
+    "data_h5": {
+      "train": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/train.h5",
+      "val": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/val.h5",
+      "test": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/test.h5"
+    },
+    "input_channels": [
+      "dose",
+      "ct",
+      "fused"
+    ],
+    "num_workers": 16,
+    "pin_memory": true,
+    "is_2d": false,
+    "slice_size_2d": 256,
+    "patch_size_3d": [
+      50,
+      50,
+      50
+    ],
+    "fusion": {
+      "method": "weighted_sum",
+      "dose_weight": 0.7,
+      "ct_weight": 0.3,
+      "normalize": false
+    },
+    "use_single_file": false,
+    "data_file": null,
+    "test_mode": false,
+    "n_test_samples": null,
+    "input_size_3d": [
+      50,
+      50,
+      50
+    ]
+  },
+  "preprocessing_config": "config/new_pipeline_config.yaml",
+  "transforms": {
+    "augment": true,
+    "rotate": true,
+    "flip": true,
+    "adjust_brightness": true,
+    "random_crop": false,
+    "random_noise": false,
+    "anatomy_deformation": {
+      "enabled": true,
+      "probability": 0.25,
+      "max_translation_voxels": 2.0,
+      "max_rotation_deg": 5.0,
+      "scale_range": [
+        0.95,
+        1.05
+      ]
+    }
+  },
+  "model": {
+    "type": "resnet_unet_ae",
+    "latent_dim": 69,
+    "base_filters": 60,
+    "feature_dim": 256,
+    "output_channels": 1,
+    "input_mode": "dose_ct_fused",
+    "use_bottleneck": false,
+    "bilinear_upsampling": false,
+    "dropout_mlp": 0.1,
+    "dropout_decoder": 0.1,
+    "dropout_features": 0.1,
+    "projection_sizes": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8,
+      4
+    ],
+    "attention": {
+      "enabled": false,
+      "type": "multi_scale",
+      "num_heads": 4,
+      "embed_dim": 256,
+      "dose_threshold": 0.5
+    },
+    "auxiliary": {
+      "predict_high_dose": false,
+      "high_dose_label_key": "high_dose_labels",
+      "predict_dose_level": false,
+      "dose_level_label_key": "dose_level_labels",
+      "dropout": 0.3
+    },
+    "in_channels": 3
+  },
+  "training": {
+    "optimizer": "adam",
+    "scheduler": "none",
+    "loss": "combined",
+    "batch_size": 32,
+    "learning_rate": 0.0009330606024425672,
+    "epochs": 100,
+    "early_stopping_patience": 10,
+    "weight_decay": 0.0003142880890840109,
+    "beta": 1.0,
+    "gpu_id": 0,
+    "seed": 42,
+    "grad_clip": 0.1,
+    "non_zero_loss": false,
+    "accumulation_steps": 1,
+    "numexpr_max_threads": 32
+  },
+  "clinical_metrics": {
+    "use_pymedphys_gamma": true,
+    "gamma_dose_threshold": 3.0,
+    "gamma_distance_threshold": 3.0,
+    "dose_threshold_cutoff": 10,
+    "calculate_dvh": true,
+    "dvh_num_bins": 1000,
+    "spacing": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "loss_function": {
+    "type": "mse",
+    "weights": {
+      "gamma": 0.10616955533913808
+    }
+  },
+  "wandb": {
+    "use_wandb": true,
+    "project_name": "dose_distribution_autoencoder_05mm",
+    "entity": "pgsalome",
+    "name": "trial_0",
+    "group": "opt_20251112_151228",
+    "tags": [
+      "optimization",
+      "trial_0"
+    ]
+  },
+  "optuna": {
+    "use_optuna": false,
+    "n_trials": 50,
+    "timeout": 86400,
+    "direction": "minimize",
+    "sampler": "tpe",
+    "pruner": "median",
+    "parameters": [
+      {
+        "name": "model.latent_dim",
+        "type": "int",
+        "low": 32,
+        "high": 256,
+        "log": true
+      },
+      {
+        "name": "model.base_filters",
+        "type": "int",
+        "low": 16,
+        "high": 64,
+        "log": true
+      },
+      {
+        "name": "model.attention.type",
+        "type": "categorical",
+        "choices": [
+          "multi_scale",
+          "channel",
+          "lobe"
+        ]
+      },
+      {
+        "name": "training.optimizer",
+        "type": "categorical",
+        "choices": [
+          "adam"
+        ]
+      },
+      {
+        "name": "training.scheduler",
+        "type": "categorical",
+        "choices": [
+          "reduce_on_plateau",
+          "cosine",
+          "none"
+        ]
+      },
+      {
+        "name": "training.loss",
+        "type": "categorical",
+        "choices": [
+          "mse",
+          "combined",
+          "clinical"
+        ]
+      },
+      {
+        "name": "training.learning_rate",
+        "type": "float",
+        "low": 0.0001,
+        "high": 0.001,
+        "log": true
+      },
+      {
+        "name": "training.weight_decay",
+        "type": "float",
+        "low": 1e-06,
+        "high": 0.001,
+        "log": true
+      },
+      {
+        "name": "loss_function.weights.gamma",
+        "type": "float",
+        "low": 0.0,
+        "high": 0.5
+      }
+    ]
+  },
+  "output": {
+    "model_dir": "/data/pgsal/nsclc_doseae",
+    "log_dir": "/data/pgsal/nsclc_doseae/logs",
+    "results_dir": "/data/pgsal/nsclc_doseae"
+  },
+  "pretrained_encoder": {
+    "use_pretrained_ct_encoder": false,
+    "ct_encoder_path": null,
+    "freeze_ct_encoder": true,
+    "expected_input_spacing": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "trial_num": 0
+}

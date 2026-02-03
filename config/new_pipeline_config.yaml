@@ -23,6 +23,27 @@ preprocessing:
 output:
   cache_dir: "/data/pgsal/NSCLC-Cetuximab_AE_cache"
 
+augmentation:
+  enable_synthetic_dose: false
+  synthetic_doses_per_patient: 0
+  random_seed: null
+  opentps:
+    core_path: "external/OpenTPS/opentps_core"
+    min_beams: 3
+    max_beams: 5
+    gantry_range_deg: [0.0, 360.0]
+    couch_range_deg: [-10.0, 10.0]
+    beamlet_spacing_mm: 5.0
+    target_margin_mm: 5.0
+    optimizer_max_iterations: 120
+    prescription_gy: null
+    prescription_scale_range: [0.9, 1.1]
+    target_isodose_range: [0.75, 0.95]
+    min_target_voxels: 750
+    target_mask_dilation_mm: 2.0
+    ccc_batch_size: 24
+    workspace_dir: null
+
 segmentation:
   device: "gpu:0,1,2"
   max_concurrent: 1       

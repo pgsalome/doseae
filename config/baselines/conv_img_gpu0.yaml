@@ -1,0 +1,76 @@
+dataset:
+  dataset_type: images
+  data_h5:
+    train: /data/pgsal/NSCLC-Cetuximab_AE_cache/processed_images/train.h5
+    val: /data/pgsal/NSCLC-Cetuximab_AE_cache/processed_images/val.h5
+    test: /data/pgsal/NSCLC-Cetuximab_AE_cache/processed_images/test.h5
+  input_channels:
+  - dose
+  num_workers: 8
+  pin_memory: true
+  is_2d: false
+  input_size_3d:
+  - 128
+  - 128
+  - 128
+  min_dose: 1.0e-06
+  test_mode: false
+preprocessing_config: ../new_pipeline_config.yaml
+transforms:
+  augment: false
+model:
+  type: conv_autoencoder
+  latent_dim: 256
+  base_filters: 32
+  feature_dim: 512
+  output_channels: 1
+  input_mode: dose_only
+  input_size:
+  - 128
+  - 128
+  - 128
+  bilinear_upsampling: false
+  dropout_mlp: 0.1
+  dropout_decoder: 0.1
+  dropout_features: 0.1
+training:
+  optimizer: adam
+  scheduler: reduce_on_plateau
+  scheduler_patience: 2
+  loss: mse
+  batch_size: 8
+  learning_rate: 0.0001
+  epochs: 200
+  early_stopping_patience: 10
+  weight_decay: 0.00001
+  beta: 1.0
+  gpu_ids:
+  - 0
+  seed: 52
+  grad_clip: 0.05
+  non_zero_loss: false
+  accumulation_steps: 1
+  numexpr_max_threads: 32
+  use_amp: false
+  log_frequency: 5
+  log_grad_norm: true
+clinical_metrics: null
+loss_function:
+  type: mse
+wandb:
+  use_wandb: true
+  project_name: dose_distribution_autoencoder_images
+  entity: pgsalome
+  name: conv_img_gpu0
+  group: image_runs
+  log_validation_sample: true
+output:
+  results_dir: /data/pgsal/nsclc_doseae/baselines/conv_img_gpu0
+  model_dir: /data/pgsal/nsclc_doseae/baselines/conv_img_gpu0/models
+  log_dir: /data/pgsal/nsclc_doseae/baselines/conv_img_gpu0/logs
+pretrained_encoder:
+  use_pretrained_ct_encoder: true
+  source: models_genesis
+  ssl_variant: genesis
+  ct_encoder_path: external/ModelsGenesis/pretrained/Genesis_Chest_CT.pt
+  freeze_ct_encoder: false

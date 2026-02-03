@@ -1,0 +1,181 @@
+{
+  "dataset": {
+    "dataset_type": "patches",
+    "data_h5": {
+      "train": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/train.h5",
+      "val": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/val.h5",
+      "test": "/data/pgsal/NSCLC-Cetuximab_AE_cache/processed_patches/test.h5"
+    },
+    "input_channels": [
+      "dose",
+      "ct"
+    ],
+    "num_workers": 12,
+    "pin_memory": true,
+    "is_2d": false,
+    "slice_size_2d": 256,
+    "patch_size_3d": [
+      50,
+      50,
+      50
+    ],
+    "input_size_3d": [
+      50,
+      50,
+      50
+    ],
+    "fusion": {
+      "method": "weighted_sum",
+      "dose_weight": 0.7,
+      "ct_weight": 0.3,
+      "normalize": false
+    },
+    "min_dose": 1e-06,
+    "use_single_file": false,
+    "data_file": null,
+    "test_mode": false
+  },
+  "preprocessing_config": "../new_pipeline_config.yaml",
+  "transforms": {
+    "augment": false
+  },
+  "model": {
+    "type": "doseae_resunet",
+    "in_channels": 2,
+    "output_channels": 1,
+    "base_filters": 59,
+    "feature_dim": 512,
+    "latent_dim": 8,
+    "attention_heads": 8,
+    "num_patches_per_patient": 64,
+    "projection_sizes": [
+      256,
+      128,
+      64,
+      32,
+      16,
+      8,
+      4
+    ]
+  },
+  "training": {
+    "optimizer": "adam",
+    "scheduler": "cosine",
+    "scheduler_patience": 2,
+    "loss": "mse",
+    "batch_size": 12,
+    "learning_rate": 8.855964694098322e-05,
+    "epochs": 100,
+    "early_stopping_patience": 10,
+    "weight_decay": 0.0009199133647776704,
+    "beta": 1.0,
+    "gpu_ids": [
+      0
+    ],
+    "seed": 45,
+    "grad_clip": 0.05,
+    "non_zero_loss": false,
+    "accumulation_steps": 1,
+    "numexpr_max_threads": 32,
+    "use_amp": false,
+    "log_frequency": 10,
+    "log_grad_norm": true
+  },
+  "clinical_metrics": null,
+  "loss_function": {
+    "type": "mse"
+  },
+  "wandb": {
+    "use_wandb": true,
+    "project_name": "dose_distribution_autoencoder_05mm",
+    "entity": "pgsalome",
+    "name": "trial_4",
+    "group": "opt_20251107_170307",
+    "log_validation_sample": true,
+    "tags": [
+      "optimization",
+      "trial_4"
+    ]
+  },
+  "optuna": {
+    "use_optuna": true,
+    "n_trials": 20,
+    "timeout": 86400,
+    "direction": "minimize",
+    "sampler": "tpe",
+    "pruner": "median",
+    "parameters": [
+      {
+        "name": "model.base_filters",
+        "type": "int",
+        "low": 16,
+        "high": 64
+      },
+      {
+        "name": "model.feature_dim",
+        "type": "categorical",
+        "choices": [
+          128,
+          256,
+          512
+        ]
+      },
+      {
+        "name": "model.latent_dim",
+        "type": "categorical",
+        "choices": [
+          8,
+          16,
+          32,
+          64
+        ]
+      },
+      {
+        "name": "model.attention_heads",
+        "type": "categorical",
+        "choices": [
+          2,
+          4,
+          8
+        ]
+      },
+      {
+        "name": "training.learning_rate",
+        "type": "float",
+        "low": 1e-05,
+        "high": 0.0005,
+        "log": true
+      },
+      {
+        "name": "training.weight_decay",
+        "type": "float",
+        "low": 1e-06,
+        "high": 0.001,
+        "log": true
+      },
+      {
+        "name": "training.batch_size",
+        "type": "categorical",
+        "choices": [
+          8,
+          12,
+          16
+        ]
+      },
+      {
+        "name": "training.scheduler",
+        "type": "categorical",
+        "choices": [
+          "reduce_on_plateau",
+          "cosine"
+        ]
+      }
+    ]
+  },
+  "output": {
+    "results_dir": "/data/pgsal/nsclc_doseae/baselines/resunet_attention_gpu0",
+    "model_dir": "/data/pgsal/nsclc_doseae/baselines/resunet_attention_gpu0/models",
+    "log_dir": "/data/pgsal/nsclc_doseae/baselines/resunet_attention_gpu0/logs"
+  },
+  "trial_num": 4
+}

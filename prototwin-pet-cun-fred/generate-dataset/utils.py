@@ -1,0 +1,654 @@
+"""Utility functions for the Fred dataset generation"""
+import os
+import subprocess
+import numpy as np
+if not hasattr(np, "bool8"):  # in newer numpy versions some itk stuff can give errors
+    np.bool8 = np.bool_
+import itk
+from pathlib import Path
+import pydicom
+from pydicom.uid import generate_uid, RTDoseStorage
+import SimpleITK as sitk
+import pandas as pd
+import gzip
+from scipy.ndimage import zoom
+import matplotlib.pyplot as plt
+
+def positronCTtoMat(CT_uncropped, hu2densities_path, materials_path, density_path):
+    """Convert CT image to materials and densities for Paula's hybrid Positron Range Simulation"""
+    densities = np.array(
+        [
+            0.00121,
+            0.48,
+            0.9264553,
+            0.9577225,
+            0.9845125,
+            1.0113025,
+            1.0296090,
+            1.06086550,
+            1.12000000,
+            1.1117200,
+            1.16500000,
+            1.22420000,
+            1.28340000,
+            1.34260000,
+            1.40180000,
+            1.46100000,
+            1.52020000,
+            1.57940000,
+            1.63860000,
+            1.69780000,
+            1.75700000,
+            1.81620000,
+            1.87540000,
+            1.93460000,
+        ]
+    )
+    hu_2_density_map = {}  # Hounsfield unit to density map
+    with open(hu2densities_path, "r") as file:
+        lines = file.readlines()[2:]  # Skip the first two lines
+        for line in lines:
+            line_parts = line.split()
+            hu = line_parts[1]
+            density = line_parts[2]
+            hu_2_density_map[int(hu)] = float(density)
+
+    hu_2_density_vectorized_mapping = np.vectorize(hu_2_density_map.get)
+    density_array = hu_2_density_vectorized_mapping(CT_uncropped)
+    material_array = (
+        np.argmin(np.abs(density_array[..., None] - densities), axis=-1) + 1
+    )
+
+    # change material_array to float32
+    material_raw = material_array.astype(np.int32).transpose(2, 1, 0)
+    material_raw.tofile(materials_path)
+    density_raw = density_array.astype(np.float32).transpose(2, 1, 0)
+    density_raw.tofile(density_path)
+    return None
+
+
+def gen_voxel(
+    CT,
+    activity_array,
+    out_path,
+    hu2densities_path,
+    nvox=(248, 140, 176),
+    dvox=[0.19531, 0.19531, 0.15],
+):
+    # materials = ["air", "lung", "adipose", "water",
+    #             "breast_glandular","glands_others", "stomach_intestines",
+    #             "muscle", "skin", "spongiosa"]
+    densities = np.array([0.0012, 0.3, 0.95, 1.0, 1.02, 1.03, 1.04, 1.05, 1.09, 1.18])
+    hu_2_density_map = {}  # Hounsfield unit to density map
+    with open(hu2densities_path, "r") as file:
+        lines = file.readlines()[2:]  # Skip the first two lines
+        for line in lines:
+            line_parts = line.split()
+            hu = line_parts[1]
+            density = line_parts[2]
+            hu_2_density_map[int(hu)] = float(density)
+
+    CT = np.round(CT).astype(int)
+    hu_2_density_vectorized_mapping = np.vectorize(hu_2_density_map.get)
+    density_array = hu_2_density_vectorized_mapping(CT)
+    material_array = (
+        np.argmin(np.abs(density_array[..., None] - densities), axis=-1) + 1
+    )
+    material_flat = material_array.flatten(order="F")
+    density_flat = density_array.flatten(order="F")
+    activity_flat = activity_array.flatten(order="F")
+
+    # removed materials for redundancy: soft tissue, kidneys (1.05), brain(1.05), liver(1.05), cartilage(1.05), eyes (1.05)
+    out = open(out_path, "w")
+
+    # -- WRITE HEADER
+    out.write("[SECTION VOXELS HEADER v.2008-04-13]\n")
+    out.write(
+        str(nvox[0])
+        + " "
+        + str(nvox[1])
+        + " "
+        + str(nvox[2])
+        + "   No. OF VOXELS IN X,Y,Z\n"
+    )
+    out.write(
+        str(dvox[0])
+        + " "
+        + str(dvox[1])
+        + " "
+        + str(dvox[2])
+        + "   VOXEL SIZE (cm) ALONG X,Y,Z\n"
+    )
+    out.write(" 1                  COLUMN NUMBER WHERE MATERIAL ID IS LOCATED\n")
+    out.write(" 2                  COLUMN NUMBER WHERE THE MASS DENSITY IS LOCATED\n")
+    out.write(" 0                  BLANK LINES AT END OF X,Y-CYCLES (1=YES,0=NO)\n")
+    out.write(
+        "[END OF VXH SECTION]  # MCGPU-PET voxel format: Material  Density  Activity\n"
+    )
+
+    # Write the flattened arrays as columns separated by space
+    for material, density, activity in zip(material_flat, density_flat, activity_flat):
+        out.write(f"{material} {density} {activity}\n")
+
+    out.close()
+    return None
+
+
+def crop_save_npy(npy_array, npy_path, raw_path=None, Trans=(0, 0, 0), HL=(64, 48, 64)):
+    # Trans is offset in each direction, HL is half-length of the cropped image
+    npy_array_cropped = npy_array[
+        npy_array.shape[0] // 2
+        + Trans[0]
+        - HL[0] : npy_array.shape[0] // 2
+        + Trans[0]
+        + HL[0],
+        npy_array.shape[1] // 2
+        + Trans[1]
+        - HL[1] : npy_array.shape[1] // 2
+        + Trans[1]
+        + HL[1],
+        npy_array.shape[2] // 2
+        + Trans[2]
+        - HL[2] : npy_array.shape[2] // 2
+        + Trans[2]
+        + HL[2],
+    ]
+    np.save(npy_path, npy_array_cropped)
+    if raw_path is not None:
+        npy_array_cropped_transposed = npy_array_cropped.transpose(2, 1, 0)
+        npy_array_cropped.tofile(raw_path)
+    return npy_array_cropped
+
+
+def crop_save_image(
+    file_path,
+    uncropped_shape=(272, 272, 176),
+    xmin=0,
+    xmax=None,
+    ymin=0,
+    ymax=None,
+    zmin=0,
+    zmax=None,
+    is_CT_image=False,
+    crop_body=False,
+    body_coords=None,
+    save_raw=False,
+):
+    with open(file_path, "rb") as f:
+        if is_CT_image:  # Provide the .raw directly, without the mhd header
+            img = (
+                np.frombuffer(f.read(), dtype=np.int16)
+                .reshape(uncropped_shape, order="F")
+                .astype(np.float32)
+            )
+        else:
+            # Read the header line by line until we find the line that specifies the binary data
+            while True:
+                line = f.readline()
+                if line.strip() == b"ElementDataFile = LOCAL":
+                    break  # Stop after the header line
+            # Read the img
+            img = np.frombuffer(f.read(), dtype=np.float32).reshape(
+                uncropped_shape, order="F"
+            )
+
+    if crop_body and body_coords is not None:
+        img_full = img.copy()
+        img = np.zeros_like(img_full)
+        img[body_coords] = img_full[body_coords]
+
+    if xmax is None:
+        xmax = uncropped_shape[0]
+    if ymax is None:
+        ymax = uncropped_shape[1]
+    if zmax is None:
+        zmax = uncropped_shape[2]
+    img = img[xmin:xmax, ymin:ymax, zmin:zmax]
+
+    if save_raw and not is_CT_image:
+        img_raw = img.transpose(2, 1, 0)
+        img_raw.tofile(file_path[:-3] + "raw")
+
+    if not is_CT_image:
+        os.remove(file_path)
+    return img
+
+
+def crop_resize_save(
+    original_mhd_file_path,
+    final_npy_file_path,
+    final_voxel_size=None,
+    final_shape=None,
+    remove_file=False,
+):
+    """Crop and resize the array image to the final shape and voxel size"""
+    # Read the mhd file to get the original array image
+    original_array = itk.imread(original_mhd_file_path)
+    original_voxel_size = original_array.GetSpacing()
+    original_array = itk.array_view_from_image(original_array).astype(np.float32).transpose(2, 1, 0)
+    
+    if final_voxel_size is None:
+        resized_array = original_array
+    else:
+        # resize the array image to the final voxel size
+        resize_factors = [
+            original_voxel_size[0] / final_voxel_size[0],
+            original_voxel_size[1] / final_voxel_size[1],
+            original_voxel_size[2] / final_voxel_size[2],
+        ]
+        resized_array = zoom(np.array(original_array), resize_factors, order=2)
+
+    if final_shape is None:
+        final_array = resized_array
+    else:
+        # Crop the resized array image to the final shape
+        final_array = resized_array[
+            resized_array.shape[0] // 2 - final_shape[0] // 2
+            : resized_array.shape[0] // 2 + final_shape[0] // 2,
+            resized_array.shape[1] // 2 - final_shape[1] // 2
+            : resized_array.shape[1] // 2 + final_shape[1] // 2,
+            resized_array.shape[2] // 2 - final_shape[2] // 2
+            : resized_array.shape[2] // 2 + final_shape[2] // 2,
+        ]
+        
+    # Save the final array image as a numpy array
+    np.save(final_npy_file_path, final_array)
+    if remove_file:
+        os.remove(original_mhd_file_path)
+    
+    return final_array
+    
+
+def get_isotope_factors(
+    initial_time, final_time, irradiation_time=0, isotope_list=["C11", "N13", "O15"]
+):
+    # Initial and final time of PET measurements in ***minutes****
+    # Half lives
+    T_1_2_C11 = 20.4  # minutes
+    T_1_2_N13 = 9.965  # minutes
+    T_1_2_O15 = 2.04  # minutes
+    T_1_2_C10 = 0.32  # minutes
+    T_1_2_O14 = 1.18  # minutes
+    T_1_2_P30 = 2.498  # minutes
+    T_1_2_K38 = 7.637  # minutes
+
+    # Decay constants. If biological decay is not considered, only the physical decay is considered
+    lambda_dict = {}
+    lambda_dict["C11"] = np.log(2) / T_1_2_C11
+    lambda_dict["N13"] = np.log(2) / T_1_2_N13
+    lambda_dict["O15"] = np.log(2) / T_1_2_O15
+    lambda_dict["C10"] = np.log(2) / T_1_2_C10
+    lambda_dict["O14"] = np.log(2) / T_1_2_O14
+    lambda_dict["P30"] = np.log(2) / T_1_2_P30
+    lambda_dict["K38"] = np.log(2) / T_1_2_K38
+
+    # Biological decay constants
+    # Medium and fast components are based on Toramatsu et al. 2018, slow based on Parodi et al. 2007
+    lambda_bio_dict = {}
+    lambda_bio_dict["C11"] = {
+        "inert": { "fast":0., "medium": 0., "slow": 0.0},
+        "air": {"fast": 21.04, "medium": 0.3, "slow": 0.0} ,
+        "fat": {"fast": 21.04, "medium": 0.3, "slow": np.log(2) * 60 / 15000},
+        "brain": {"fast": 21.04, "medium": 0.3, "slow": np.log(2) * 60 / 10000},
+        "soft bone": {"fast": 21.04, "medium": 0.3, "slow": np.log(2) * 60 / 8000},
+        "compact bone": {"fast": 21.04, "medium": 0.3, "slow": np.log(2) * 60 / 15000},
+    }
+    lambda_bio_dict["O15"] = {
+        "inert": { "fast":0., "medium": 0., "slow": 0.0},
+        "air": {"fast": 0.0, "medium": 0.72, "slow": 0.024},
+        "fat": {"fast": 0.0, "medium": 0.72, "slow": 0.024},
+        "brain": {"fast": 0.0, "medium": 0.72, "slow": 0.024},
+        "soft bone": {"fast": 0.0, "medium": 0.72, "slow": 0.024},
+        "compact bone": {"fast": 0.0, "medium": 0.72, "slow": 0.024},
+    }
+
+    lambda_bio_dict["C10"] = lambda_bio_dict["C11"]
+    lambda_bio_dict["O14"] = lambda_bio_dict["O15"]
+    lambda_bio_dict["N13"] = lambda_bio_dict["O15"]  # For now setting K38 to O15 values
+    lambda_bio_dict["P30"] = lambda_bio_dict["O15"]
+    lambda_bio_dict["K38"] = lambda_bio_dict["O15"]  # For now setting K38 to O15 values
+
+    component_fraction_dict = (
+        {}
+    )  # fraction of slow, medium and fast components in each organ
+    component_fraction_dict["C11"] = {
+        "inert": { "fast":0., "medium": 0., "slow": 1.0},
+        "air": {"fast": 0.0, "medium": 0.0, "slow": 1.0},
+        "fat": {
+            "fast": 0.2 * (1 - 0.9) / 0.52,
+            "medium": 0.32 * (1 - 0.9) / 0.52,
+            "slow": 0.9,
+        },  # * 0.1 / 0.52 is the fraction of medium and fast components taking into account the slow component, which takes precedence
+        "brain": {
+            "fast": 0.2 * (1 - 0.35) / 0.52,
+            "medium": 0.32 * (1 - 0.35) / 0.52,
+            "slow": 0.35,
+        },
+        "soft bone": {
+            "fast": 0.2 * (1 - 0.6) / 0.52,
+            "medium": 0.32 * (1 - 0.6) / 0.52,
+            "slow": 0.6,
+        },
+        "compact bone": {
+            "fast": 0.2 * (1 - 0.9) / 0.52,
+            "medium": 0.32 * (1 - 0.9) / 0.52,
+            "slow": 0.9,
+        },
+    }
+    component_fraction_dict["O15"] = {
+        "inert": { "fast":0., "medium": 0., "slow": 1.0},
+        "air": {"fast": 0.0, "medium": 0.62, "slow": 0.38},
+        "fat": {"fast": 0.0, "medium": 0.62, "slow": 0.38},
+        "brain": {"fast": 0.0, "medium": 0.62, "slow": 0.38},
+        "soft bone": {"fast": 0.0, "medium": 0.62, "slow": 0.38},
+        "compact bone": {"fast": 0.0, "medium": 0.62, "slow": 0.38},
+    }
+    component_fraction_dict["C10"] = component_fraction_dict["C11"]
+    component_fraction_dict["O14"] = component_fraction_dict["O15"]
+    component_fraction_dict["N13"] = component_fraction_dict["O15"]
+    component_fraction_dict["P30"] = component_fraction_dict["O15"]
+    component_fraction_dict["K38"] = component_fraction_dict["O15"]
+
+    ### TO GET ACTIVITY IN Bq
+    # print("Activity factor (multiply by max of activation image for each isotope and by sensitivity of the scanner (0.05) and add them up to get initial activity in Bq to scale the activation image)")
+    # print('C11: ', lambda_dict['C10'] / 60 * np.exp(-lambda_dict['C10'] * initial_time))  # divide by 60 to go from minutes to seconds
+    # print('N13: ', lambda_dict['N13'] / 60 * np.exp(-lambda_dict['N13'] * initial_time))
+    # print('O15: ', lambda_dict['O15'] / 60 * np.exp(-lambda_dict['O15'] * initial_time))
+    # print('C10: ', lambda_dict['C10'] / 60 * np.exp(-lambda_dict['C10'] * initial_time))
+    ###
+
+    print(
+        f"Fraction of activations measured: from {initial_time} to {final_time} minutes:"
+    )
+    factor_dict = {}
+    for isotope in isotope_list:
+        factor_dict[isotope] = {}
+        # Taking into account the irradiation time to get the number of activated isotopes, at the end of the irradiation
+        if irradiation_time != 0:
+            for tissue in lambda_bio_dict[isotope].keys():
+                factor_dict[isotope][tissue] = 0
+                # Getting the remaining existing radiactive isotopes at the end of the irradiation
+                for component in lambda_bio_dict[isotope][tissue].keys():
+                    factor_dict[isotope][tissue] += (
+                        component_fraction_dict[isotope][tissue][component]
+                        / (
+                            lambda_bio_dict[isotope][tissue][component]
+                            + lambda_dict[isotope]
+                        )
+                        / irradiation_time
+                        * (
+                            1
+                            - np.exp(
+                                -(
+                                    lambda_bio_dict[isotope][tissue][component]
+                                    + lambda_dict[isotope]
+                                )
+                                * irradiation_time
+                            )
+                        )
+                    )
+            # print(isotope, factor_dict[isotope])
+        else:
+            N0 = 1
+            for tissue in lambda_bio_dict[isotope].keys():
+                factor_dict[isotope][tissue] = N0
+
+        for tissue in lambda_bio_dict[isotope].keys():
+            # Getting the activated isotopes during the PET measurements
+            decay_factor = 0
+            for component in lambda_bio_dict[isotope][tissue].keys():
+                # # For the factor to reduce the number of activations to match those expected in the PET measurements from inital to final time: (parallelproj)
+                # decay_factor += component_fraction_dict[isotope][tissue][component] * (np.exp(-(lambda_dict[isotope] + lambda_bio_dict[isotope][tissue][component]) * initial_time) - np.exp(-(lambda_dict[isotope] + lambda_bio_dict[isotope][tissue][component]) * final_time))
+                # For the factor to convert the activation into activity at the start of the PET measurements (MCGPU-PET)  ###s
+                decay_factor += (
+                    component_fraction_dict[isotope][tissue][component]
+                    * (
+                        lambda_dict[isotope]
+                        + lambda_bio_dict[isotope][tissue][component]
+                    )
+                    / 60
+                    * np.exp(
+                        -(
+                            lambda_dict[isotope]
+                            + lambda_bio_dict[isotope][tissue][component]
+                        )
+                        * initial_time
+                    )
+                )
+            factor_dict[isotope][tissue] *= decay_factor
+            # print(f"{isotope} in {tissue}: {factor_dict[isotope][tissue]}")
+    return factor_dict
+
+
+# def washout_organ_mask(initial_time, final_time, organ_struct, activity_image, isotope):
+
+
+def convert_CT_to_mhd(
+    mhd_file, dicom_dir=None, matRad_output=None, 
+    water_layer=False
+):
+    # RUN WITH CONDA ENVIRONMENTS dcm2mhd (octopus PC) OR prototwin-pet (environment.yml, install for any PC with conda env create -f environment.yml)
+    # Convert DICOM or .mat CT files to MHD format
+
+    # If the DICOM directory is provided, use it to read the CT image
+    if dicom_dir is not None:
+        # Initialize the names generator
+        names_generator = itk.GDCMSeriesFileNames.New()
+        names_generator.SetDirectory(dicom_dir)
+
+        PixelType = itk.SS
+        Dimension = 3
+
+        ImageType = itk.Image[PixelType, Dimension]
+
+        # Get the series UID. Assuming there's only one series in the directory for simplicity.
+        series_uid = names_generator.GetSeriesUIDs()
+        if not series_uid:
+            raise RuntimeError("No DICOM series found in the specified directory.")
+
+        # Use the first series UID to get file names. Modify as needed if handling multiple series.
+        file_names = names_generator.GetFileNames(series_uid[0])
+
+        # Initialize and configure the reader
+        reader = itk.ImageSeriesReader[ImageType].New()
+        reader.SetFileNames(file_names)
+
+        # No need to explicitly set an ImageIO as itk.ImageSeriesReader automatically selects one.
+
+        # Read and then write the image
+        reader.Update()
+        image = reader.GetOutput()
+        direction = np.eye(3)
+        image.SetDirection(direction)
+        
+        spacing = np.array(image.GetSpacing())        # voxel spacing (dx, dy, dz)
+        origin = np.array(image.GetOrigin())          # image origin in physical space
+        size = np.array(image.GetLargestPossibleRegion().GetSize())  # number of voxels (nx, ny, nz)
+        direction = np.array(image.GetDirection())    # direction cosine matrix (should be identity here)
+
+        # Isocenter in physical coordinates (center of the volume)
+        isocenter = origin + direction @ (spacing * (size - 1) / 2)
+
+        # Optionally, print or return these values
+        print("Isocenter (mm):", isocenter)
+        print(f"Conversion complete. MHD file saved at: {mhd_file}")
+            
+        
+        # If a water layer is specified, add it to the image
+        if water_layer:
+            image_array = itk.array_view_from_image(image)
+            image_array[:, -109:-100, :] = 0  # because the table is like 8mm of water and each voxel is 0.88mm
+            image_array[:, -100:, :] = -1000  # set the rest to -1000 HU (air, removing the rest of the couch)
+            image = itk.image_from_array(image_array, is_vector=False)
+            image.SetSpacing(spacing)
+            image.SetOrigin(origin)
+            image.SetDirection(direction)
+        
+        itk.imwrite(image, mhd_file)
+        return isocenter, origin
+
+    elif matRad_output is not None:
+        CT_resolution = matRad_output["CT_resolution"][
+            0
+        ]  # ct = matRad_output['ct'];  CT_resolution = [ct[0, 0][0][0][0][0][0][0], ct[0, 0][0][0][0][1][0][0], ct[0, 0][0][0][0][2][0][0]]
+        CT_offset = matRad_output["CT_offset"].T[
+            0
+        ]  # CT_offset = ct[0, 0][6][0][0][3].T[0]
+        CT_cube = matRad_output["CT_cube"].astype(
+            np.int16
+        )  # CT_cube = ct[0, 0][9][0][0].astype(np.int16)
+
+        CT_cube = CT_cube.transpose(1, 0, 2)  # to load from matlab
+        CT_cube = CT_cube.transpose(2, 1, 0)  # to save in fortran order
+
+        with open(mhd_file[:-4] + ".raw", "wb") as CT_file:
+            CT_cube.tofile(CT_file)
+
+        with open(mhd_file, "wb") as CT_file:
+            CT_file.write(
+                (
+                    f"ObjectType = Image\n"
+                    f"NDims = 3\n"
+                    f"BinaryData = True\n"
+                    f"BinaryDataByteOrderMSB = False\n"
+                    f"CompressedData = False\n"
+                    f"TransformMatrix = 1 0 0 0 1 0 0 0 1\n"
+                    f"Offset = {CT_offset[0]} {CT_offset[1]} {CT_offset[2]}\n"
+                    f"CenterOfRotation = 0 0 0\n"
+                    f"AnatomicalOrientation = RAI\n"
+                    f"ElementSpacing = {CT_resolution[0]} {CT_resolution[1]} {CT_resolution[2]}\n"
+                    f"ITK_non_uniform_sampling_deviation = 0.0001\n"
+                    f"DimSize = {CT_cube.shape[2]} {CT_cube.shape[1]} {CT_cube.shape[0]}\n"
+                    f"ElementType = MET_SHORT\n"
+                    f"ElementDataFile = CT.raw\n"
+                ).encode()
+            )
+
+        print(f"Conversion complete. MHD file saved at: {mhd_file}")
+        return None
+
+
+def mhd_resolution_size(mhd_file):
+    """Get the resolution and size of the MHD file"""
+    with open(mhd_file, "r") as f:
+        lines = f.readlines()
+    
+    resolution = None
+    size = None
+    for line in lines:
+        if "ElementSpacing" in line:
+            resolution = np.array([float(x) for x in line.split("=")[1].strip().split()])
+        elif "DimSize" in line:
+            size = np.array([int(x) for x in line.split("=")[1].strip().split()])
+    
+    return resolution, size
+
+
+def convert_mhd_to_dcm(
+    mhd_file, dcm_file, dcm_template, CT_dcm_template, img=None, voxel_size=None
+):
+    """Convert MHD file to DICOM format using sitk with default parameters"""
+    
+    mhd_img = sitk.ReadImage(mhd_file)
+    
+    # reference image
+    ref_img = pydicom.dcmread(dcm_template)
+    ref_img_file = sitk.ReadImage(CT_dcm_template)
+    origin  = list(ref_img_file.GetOrigin())  # Get origin from the DICOM template file
+    direction = list(ref_img_file.GetDirection())  # Get direction from the DICOM template file
+    
+    if img is None:
+        img = sitk.GetArrayFromImage(mhd_img).astype(np.float32)
+    else: 
+        img = img.transpose(2, 1, 0)  # Ensure the image is in Fortran order (z, y, x)
+        direction = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0] 
+    scale = float(img.max()) / 65535.0
+    img = np.round(img / scale).astype(np.uint16)
+    
+    img_dcm = ref_img.copy()
+    if voxel_size is None:
+        spacing = list(mhd_img.GetSpacing())
+    else:
+        spacing = list(voxel_size)
+    
+    img_dcm.Rows = img.shape[1]
+    img_dcm.Columns = img.shape[2]
+    img_dcm.NumberOfFrames = img.shape[0]
+
+    img_dcm.PixelSpacing    = [f"{spacing[1]:.6f}", f"{spacing[0]:.6f}"]
+    img_dcm.GridFrameOffsetVector = [f"{k*spacing[2]:.6f}" for k in range(img_dcm.NumberOfFrames)]
+    img_dcm.ImageOrientationPatient = [f"{v:.6f}" for v in (
+        direction[0], direction[3], direction[6],
+        direction[1], direction[4], direction[7])]
+    img_dcm.ImagePositionPatient = [f"{v:.6f}" for v in origin]
+
+    img_dcm.SOPClassUID         = RTDoseStorage   
+    img_dcm.Modality            = "RTDOSE"
+    img_dcm.BitsAllocated       = 16
+    img_dcm.BitsStored          = 16
+    img_dcm.HighBit             = 15
+    img_dcm.PixelRepresentation = 0
+    img_dcm.DoseUnits           = "GY"
+    img_dcm.DoseType            = "PHYSICAL"
+    img_dcm.DoseSummationType   = "PLAN"
+    img_dcm.DoseGridScaling     = f"{scale:.8E}"
+
+    img_dcm.SOPInstanceUID      = generate_uid()
+    img_dcm.SeriesInstanceUID   = generate_uid()
+
+    img_dcm.PixelData = img.tobytes()
+    img_dcm.save_as(dcm_file, write_like_original=False)
+    
+
+def read_rtplan(rtplan_file, df_rtplan_path):
+    """Read RTPLAN file and return the plan name and number of fractions"""
+    rtplan = pydicom.dcmread(Path(rtplan_file))
+    df_rtplan_path = Path(df_rtplan_path)
+
+    plan_list = []
+    for field_num, field in enumerate(rtplan.IonBeamSequence):
+        for control_point_num, control_point in enumerate(field.IonControlPointSequence):  # one energy per control point
+            if control_point_num == 0:
+                isocenter = np.asarray(control_point.IsocenterPosition, dtype=np.float32) / 10  # to cm for FRED
+                print(f"Isocenter: {isocenter}")
+                isocenter[0] = -isocenter[0]  ###
+                isocenter = np.delete(isocenter, 1)  # remove the y coordinate
+            weights = np.atleast_1d(control_point.ScanSpotMetersetWeights).astype(np.float32)
+            positions = np.asarray(control_point.ScanSpotPositionMap, dtype=np.float32) / 10  # to cm for FRED
+            if np.all(weights == 0):
+                continue
+            energy = float(control_point.NominalBeamEnergy)
+            spot_size = np.asarray(control_point.ScanningSpotSize, dtype=np.float32) / 10
+            n = int(control_point.NumberOfScanSpotPositions)                          # (300A,0392)
+            assert positions.size == 2*n and weights.size == n, "tag length mismatch"
+            positions = positions.reshape(n, 2)
+            positions += isocenter
+            
+            for idx in range(n):
+                plan_list.append(
+                    {
+                        "field_num": field_num,
+                        "energy": energy,
+                        "FWHMx": spot_size[0],
+                        "FWHMz": spot_size[1],
+                        "pos_target_x": positions[idx, 0],
+                        "pos_target_z": positions[idx, 1],
+                        "weight": weights[idx],
+                    }
+                )
+                
+    df_rtplan = pd.DataFrame.from_records(plan_list)
+    df_rtplan.to_csv(df_rtplan_path, index=False)
+    print(df_rtplan.head())
+    print(f"RTPLAN file {rtplan_file} read successfully. Data saved to {df_rtplan_path}.")
+    return df_rtplan
+            
+            
+def load_rtdose(rtdose_file):
+    """Load RTDOSE file and return the dose array in Gy"""
+    rtdose_dcm = pydicom.dcmread(rtdose_file)
+    rtdose = rtdose_dcm.pixel_array.astype(np.float32).transpose(2, 1, 0)
+    rtdose *= rtdose_dcm.DoseGridScaling  # scale the dose
+    origin = np.asarray(rtdose_dcm.ImagePositionPatient, dtype=np.float32)
+    return rtdose, origin
+    

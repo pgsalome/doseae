@@ -1,0 +1,91 @@
+dataset:
+  entity: lung
+  dataset_type: 'patches'  # overridden by CLI
+
+lung:
+  patch_size: 50
+  overlap_percentage: 20
+  patch_workers: 1
+  dose_threshold: 0.1
+  mask_acceptance: 0.7
+  lobe_composite_threshold: 0.1
+  max_patches_per_lobe: 400
+
+preprocessing:
+  voxel_spacing: [0.5, 0.5, 0.5]
+  resize_to: [128, 128, 128]
+  ct_preprocessing:
+    method: "lung_window"
+    window_center: -600
+    window_width: 1500
+    clip_range: [-1500, 300]
+
+output:
+  cache_dir: "./outputs/single_patient_synth_cache"
+
+augmentation:
+  enable_synthetic_dose: true
+  synthetic_doses_per_patient: 1
+  random_seed: 1234
+  opentps:
+    core_path: "external/OpenTPS/opentps_core"
+    min_beams: 3
+    max_beams: 3
+    gantry_range_deg: [0.0, 360.0]
+    couch_range_deg: [-5.0, 5.0]
+    beamlet_spacing_mm: 10.0
+    target_margin_mm: 5.0
+    optimizer_max_iterations: 25
+    prescription_gy: null
+    prescription_scale_range: [0.9, 1.1]
+    target_isodose_range: [0.8, 0.95]
+    min_target_voxels: 500
+    target_mask_dilation_mm: 1.5
+    ccc_batch_size: 16
+    workspace_dir: "./outputs/opentps_workspace"
+  clinical_perturbation:
+    target_threshold_range: [0.78, 0.92]
+    random_seed: 2025
+    operations:
+      beam_jitter:
+        enabled: true
+        max_pct: 0.05
+        beta_alpha: 2.0
+        beta_beta: 2.0
+        couch:
+          enabled: true
+          max_pct: 0.03
+          beta_alpha: 2.0
+          beta_beta: 2.0
+      isocenter_shift:
+        enabled: true
+        sigma_mm: [2.0, 2.0, 2.0]
+        max_mm: 5.0
+      mu_scaling:
+        enabled: true
+        max_pct: 0.05
+        beta_alpha: 2.5
+        beta_beta: 2.5
+      objective_variation:
+        enabled: false
+        dmin_margin_pct: [0.02, 0.05]
+        dmax_margin_pct: [0.04, 0.08]
+        weight_range: [0.8, 1.2]
+      robustness:
+        enabled: false
+        setup_systematic_mm: [2.0, 2.0, 2.0]
+        setup_random_mm: [1.0, 1.0, 1.0]
+        num_scenarios: 6
+        strategy: "REDUCED_SET"
+
+segmentation:
+  device: "cpu"
+  max_concurrent: 1
+  roi_subset:
+    - lung_upper_lobe_left
+    - lung_lower_lobe_left
+    - lung_upper_lobe_right
+    - lung_middle_lobe_right
+    - lung_lower_lobe_right
+    - aorta
+    - trachea

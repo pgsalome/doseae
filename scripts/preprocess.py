@@ -39,6 +39,7 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
     # Set output directory based on experiment type
     preprocessor = LungPreprocessor(config, str(output_dir))
     patient_ids = [patient['patient_id'] for patient in patients]
+    extra_patient_ids: List[str] = []
     
     results: List[Dict[str, Any]] = []
     collect_results = experiment_type != 'patch'
@@ -74,9 +75,13 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
                     torch.cuda.empty_cache()
             except:
                 pass
+            synthetic_results = result.pop('synthetic_results', []) if isinstance(result, dict) else []
+            combined = [result] + synthetic_results if isinstance(result, dict) else []
+            if not combined:
+                return []
             if collect_results:
-                return result
-            return {'patient_id': patient_id}
+                return combined
+            return [{'patient_id': entry.get('patient_id')} for entry in combined if entry.get('patient_id')]
         except Exception as e:
             logger.error(f"❌ Failed to process {patient_id}: {e}")
             # Clean up memory even on failure
@@ -87,14 +92,18 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
                     torch.cuda.empty_cache()
             except:
                 pass
-            return None
+            return []
     
     if workers <= 1:
         for idx, patient in enumerate(patients):
             try:
-                result = _process_single((idx, patient))
-                if result:
-                    results.append(result)
+                entries = _process_single((idx, patient))
+                if entries:
+                    results.extend(entries)
+                    for entry in entries:
+                        pid = entry.get('patient_id')
+                        if pid and pid not in patient_ids and pid not in extra_patient_ids:
+                            extra_patient_ids.append(pid)
             except Exception as e:
                 logger.error(f"❌ Unexpected error processing patient {idx+1}: {e}")
                 # Continue with next patient
@@ -108,15 +117,20 @@ def process_patients(patients: List[Dict], config: Dict[str, Any],
             }
             for future in as_completed(future_to_patient):
                 try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
+                    entries = future.result()
+                    if entries:
+                        results.extend(entries)
+                        for entry in entries:
+                            pid = entry.get('patient_id')
+                            if pid and pid not in patient_ids and pid not in extra_patient_ids:
+                                extra_patient_ids.append(pid)
                 except Exception as e:
                     patient = future_to_patient[future]
                     logger.error(f"❌ Unexpected error processing patient {patient['patient_id']}: {e}")
                     # Continue with next patient
                     continue
     
+    patient_ids.extend(extra_patient_ids)
     return preprocessor, results, patient_ids
 
 def main():
@@ -133,6 +147,16 @@ def main():
     
     # Load configuration
     config = load_config(args.config)
+
+    augmentation_cfg = config.get('augmentation', {})
+    if augmentation_cfg.get('enable_synthetic_dose', False):
+        synthetic_count = int(augmentation_cfg.get('synthetic_doses_per_patient', 0) or 0)
+        logger.info(
+            "Synthetic dose augmentation enabled: targeting %d synthetic dose volumes per patient.",
+            synthetic_count,
+        )
+    else:
+        logger.info("Synthetic dose augmentation disabled; proceeding with original cohort only.")
     
     # Load data splits
     splits = load_data_splits(args.splits)
@@ -147,14 +171,23 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Check if train.h5 already exists and skip if it does
+    # Decide which split-level HDF5 files must exist to consider preprocessing complete.
+    expected_splits = [name for name in ['train', 'val', 'test'] if name in splits and splits[name]]
     if args.experiment_type == 'patch':
-        train_h5_path = output_dir / 'processed_patches' / 'train.h5'
+        required_paths = [
+            output_dir / 'processed_patches' / f'{split_name}.h5'
+            for split_name in expected_splits
+        ]
     else:
-        train_h5_path = output_dir / 'processed_images' / 'train.h5'
-    
-    if train_h5_path.exists():
-        logger.info(f"⏭️  Skipping preprocessing - {train_h5_path} already exists")
+        required_paths = [
+            output_dir / 'processed_images' / f'{split_name}.h5'
+            for split_name in expected_splits
+        ]
+
+    if expected_splits and all(path.exists() for path in required_paths):
+        logger.info("⏭️  Skipping preprocessing - all required HDF5 files already exist:")
+        for path in required_paths:
+            logger.info("    %s", path)
         logger.info("🎉 Preprocessing complete!")
         return
     

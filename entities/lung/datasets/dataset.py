@@ -346,7 +346,9 @@ class PatchDataset(BaseH5Dataset):
                 json.loads(summary_blob) if summary_blob else {}
             )
 
+        self._min_dose = float(dataset_cfg.get("min_dose", 0.0) or 0.0)
         self._patient_to_indices = self._build_patient_index()
+        self._dose_mask = self._build_dose_mask()
         self._indices = self._build_active_index(indices, side, patient_ids)
 
     def _build_patient_index(self) -> Dict[str, List[int]]:
@@ -357,6 +359,21 @@ class PatchDataset(BaseH5Dataset):
                 continue
             mapping.setdefault(patient_id, []).append(idx)
         return mapping
+
+    def _build_dose_mask(self) -> np.ndarray:
+        if self._min_dose <= 0:
+            return np.ones(self._total_patches, dtype=bool)
+        mask = np.ones(self._total_patches, dtype=bool)
+        for idx, meta in enumerate(self.patch_metadata):
+            dose_max = meta.get("dose_max")
+            if dose_max is None:
+                continue
+            try:
+                if float(dose_max) <= self._min_dose:
+                    mask[idx] = False
+            except (TypeError, ValueError):
+                continue
+        return mask
 
     def _normalise_side(self, side: Optional[str]) -> Optional[str]:
         if not side:
@@ -398,6 +415,16 @@ class PatchDataset(BaseH5Dataset):
                     if self._metadata_for_index(idx).get("patient_id") in wanted
                 ],
                 dtype=np.int64,
+            )
+
+        if self._dose_mask is not None:
+            valid = self._dose_mask[active_array]
+            active_array = active_array[valid]
+
+        if active_array.size == 0:
+            raise ValueError(
+                "No patches available after applying dataset filters. "
+                "Consider lowering 'dataset.min_dose' or disabling test_mode."
             )
 
         return active_array
@@ -482,6 +509,9 @@ class PatchDataset(BaseH5Dataset):
             return list(indices)
         active = set(self._indices.tolist())
         return [idx for idx in indices if idx in active]
+
+    def get_patient_ids(self) -> List[str]:
+        return list(self._patient_to_indices.keys())
 
     def get_ipsilateral_indices(self, restrict_to_active: bool = True) -> List[int]:
         indices = self._ipsi_indices.tolist()

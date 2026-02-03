@@ -1,0 +1,29 @@
+### Base Input File ###
+# origin of beam given in rp.1.5... by VirtualSourceAxisDistances = 1342 (mm=, 134.2 cm)
+# since the ct is centered at the isocenter
+
+region< 
+    ID = Phantom
+    O=[0, 0, 0]
+    pivot=[0.5, 0.5, 0.5]
+    L=[45.2, 45.2, 46.20000000000001]
+    CTscan=/home/prototwin/prototwin-pet-cun-fred/generate-dataset/../data/datasetPHANTOM/CT.mhd
+    score=[Dose]
+region>
+
+field<
+    ID = origin
+    O=[0, 192.3, 0]
+    L=[10., 10., 10.]
+    voxels=[ 100, 100, 100 ]
+    pivot=[ 0.5, 0.5, 0.5 ]
+    material=Air
+field>
+
+# Conversión de HU a material:
+lUseInternalHU2Mat=False
+lAllowHUClamping=True  # A partir de 1300 se corta (hay poco más allá del hueso)
+lWaterIpotForHUMaterials=False
+
+# Set the seed:
+randSeedRoot = 42

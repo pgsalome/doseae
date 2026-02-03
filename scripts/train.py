@@ -195,7 +195,7 @@ def create_model(config: dict, entity_type: str):
     return get_model(config)
 
 
-def train_model(config: dict, entity_type: str, data_dir: str):
+def train_model(config: dict, entity_type: str, data_dir: str, resume: bool = False, checkpoint_path: Optional[str] = None):
     """Train the model."""
     logger = logging.getLogger(__name__)
 
@@ -231,6 +231,24 @@ def train_model(config: dict, entity_type: str, data_dir: str):
     # Create trainer
     logger.info("Creating trainer...")
     trainer = Trainer(model, config, entity_type)
+
+    if resume:
+        default_checkpoint = None
+        output_cfg = config.get('output', {})
+        model_dir = output_cfg.get('model_dir') or output_cfg.get('results_dir') or './output'
+        if checkpoint_path:
+            default_checkpoint = Path(checkpoint_path)
+        else:
+            default_checkpoint = Path(model_dir) / f"{entity_type}_best_model.pth"
+
+        if not default_checkpoint.exists():
+            logger.warning("Resume requested but checkpoint not found at %s. Starting from scratch.", default_checkpoint)
+        else:
+            try:
+                trainer.load_checkpoint(str(default_checkpoint))
+                logger.info("Resumed training from checkpoint %s", default_checkpoint)
+            except Exception as exc:
+                logger.warning("Failed to load resume checkpoint (%s); starting from scratch.", exc)
     
     # Train model
     logger.info("Starting training...")
@@ -311,16 +329,39 @@ def train_model(config: dict, entity_type: str, data_dir: str):
     logger.info(f"Test metrics saved to {test_metrics_file}")
 
     if wandb is not None and wandb.run is not None:
-        wandb_log = {'test/num_samples': test_results.get('num_samples', 0)}
+        wandb_log = {}
+        table = wandb.Table(columns=["segmentation", "metric", "statistic", "value", "gt_value"])
 
-        table = wandb.Table(columns=["segmentation", "metric", "statistic", "value"])
+        def _resolve_gt(stat_block: dict, metric_name: str, stat_name: str):
+            base_metric = None
+            if metric_name.endswith('_eval'):
+                base_metric = metric_name[:-5]
+            elif metric_name.endswith('_diff'):
+                base_metric = metric_name[:-5]
+            elif metric_name.endswith('_rel_diff'):
+                base_metric = metric_name[:-9]
+            if base_metric:
+                ref_metric = f"{base_metric}_ref"
+                ref_stats = stat_block.get(ref_metric)
+                if ref_stats:
+                    gt_val = ref_stats.get(stat_name)
+                    if gt_val is not None:
+                        return float(gt_val)
+            return None
 
         def add_rows(segmentation: str, stats: dict):
             if not stats:
                 return
             for metric, summary in stats.items():
+                if metric.endswith('_ref'):
+                    continue
                 for stat_name, value in summary.items():
-                    table.add_data(segmentation, metric, stat_name, value)
+                    if value is None:
+                        numeric_value = None
+                    else:
+                        numeric_value = float(value)
+                    gt_value = _resolve_gt(stats, metric, stat_name)
+                    table.add_data(segmentation, metric, stat_name, numeric_value, gt_value)
 
         add_rows("overall", test_results.get('overall', {}))
         for lobe, metrics in test_results.get('per_lobe', {}).items():
@@ -396,6 +437,8 @@ def main():
     parser.add_argument('--output_dir', type=str, help='Override results directory defined in config')
     parser.add_argument('--mode', type=str, choices=['train', 'optimize'], default='train', help='Training mode')
     parser.add_argument('--log_level', type=str, default='INFO', help='Logging level')
+    parser.add_argument('--resume', action='store_true', help='Resume training from the last checkpoint')
+    parser.add_argument('--checkpoint', type=str, help='Optional checkpoint path to resume from')
     
     args = parser.parse_args()
     
@@ -482,7 +525,13 @@ def main():
     # Run training or optimization
     if args.mode == 'train':
         logger.info("Starting training...")
-        training_history = train_model(config, args.entity, args.data_dir)
+        training_history = train_model(
+            config,
+            args.entity,
+            args.data_dir,
+            resume=args.resume,
+            checkpoint_path=args.checkpoint,
+        )
         logger.info("Training completed successfully")
     elif args.mode == 'optimize':
         logger.info("Starting hyperparameter optimization...")

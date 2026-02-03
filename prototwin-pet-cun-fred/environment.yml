@@ -1,0 +1,30 @@
+name: prototwin-pet-cun-fred
+channels:
+  - conda-forge
+  - simpleitk
+dependencies:
+  - python=3.11.9
+  - pip
+  - cupy
+  - itk
+  - scipy
+  - matplotlib
+  - pandas
+  - tqdm
+  - seaborn
+  - pytest
+  - hdbscan  # for clustering of decay
+  - simpleitk
+  - timm
+  - pytorch
+  - torchvision
+  - torchmetrics
+  - pydicom
+  - pip:
+    - pyradiomics  # for radiomics feature extraction
+    - batchgenerators
+    - pytorch-ssim
+    - monai
+    - opencv-python
+    - pymedphys==0.38
+

@@ -7,20 +7,22 @@ import warnings
 # Try to import PyMedPhys
 try:
     import pymedphys
-
     PYMEDPHYS_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError, AttributeError) as e:
     PYMEDPHYS_AVAILABLE = False
-    warnings.warn("PyMedPhys not available, using custom gamma implementation")
+    # Only warn if we're actually trying to use PyMedPhys functionality
+    # Suppress initial import warning since it may be available later
+    pass
 
 # Try to import dicompyler-core for DVH
 try:
     from dicompylercore import dvhcalc
-
     DICOMPYLER_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError, AttributeError) as e:
     DICOMPYLER_AVAILABLE = False
-    warnings.warn("dicompyler-core not available, using custom DVH implementation")
+    # Only warn if we're actually trying to use dicompyler functionality
+    # Suppress initial import warning since it may be available later
+    pass
 
 
 class ClinicalMetricsCalculator:
@@ -52,6 +54,8 @@ class ClinicalMetricsCalculator:
         if self.use_pymedphys:
             return self._calculate_gamma_pymedphys(dose_ref, dose_eval, mask)
         else:
+            if not PYMEDPHYS_AVAILABLE:
+                warnings.warn("PyMedPhys not available, using custom gamma implementation", stacklevel=2)
             return self._calculate_gamma_custom(dose_ref, dose_eval, mask)
 
     def _calculate_gamma_pymedphys(self, dose_ref: np.ndarray, dose_eval: np.ndarray,
@@ -141,6 +145,7 @@ class ClinicalMetricsCalculator:
         if DICOMPYLER_AVAILABLE:
             return self._calculate_dvh_dicompyler(dose, mask)
         else:
+            warnings.warn("dicompyler-core not available, using custom DVH implementation", stacklevel=2)
             return self._calculate_dvh_custom(dose, mask)
 
     def _calculate_dvh_dicompyler(self, dose: np.ndarray, mask: Optional[np.ndarray] = None) -> Tuple[
@@ -154,7 +159,11 @@ class ClinicalMetricsCalculator:
             dose = dose / 100
 
         # Calculate DVH
-        dvh_obj = dvhcalc.get_dvh(dose, mask, self.spacing)
+        try:
+            dvh_obj = dvhcalc.get_dvh(dose, mask, self.spacing)
+        except Exception:  # pragma: no cover - fallback when dicompyler fails at runtime
+            warnings.warn("dicompyler-core DVH calculation failed; using custom implementation", stacklevel=2)
+            return self._calculate_dvh_custom(dose, mask)
 
         # Get cumulative DVH data
         return dvh_obj.dose_axis, dvh_obj.cumulative.data
@@ -226,18 +235,35 @@ class ClinicalMetricsCalculator:
         metrics = {}
 
         # Gamma analysis
-        gamma_results = self.calculate_gamma(dose_ref, dose_eval, mask)
-        metrics.update(gamma_results)
+        try:
+            gamma_results = self.calculate_gamma(dose_ref, dose_eval, mask)
+            for key, value in gamma_results.items():
+                if key == 'gamma_map':
+                    continue
+                metrics[key] = value
+        except Exception as exc:  # pragma: no cover
+            warnings.warn(f"Gamma calculation failed ({exc}); skipping gamma metrics", stacklevel=2)
 
         # DVH metrics
         if self.config.get('calculate_dvh', True):
-            dvh_ref = self.calculate_dvh_metrics(dose_ref, mask)
-            dvh_eval = self.calculate_dvh_metrics(dose_eval, mask)
+            try:
+                dvh_ref = self.calculate_dvh_metrics(dose_ref, mask)
+                dvh_eval = self.calculate_dvh_metrics(dose_eval, mask)
 
-            # Calculate differences
-            for key in dvh_ref:
-                metrics[f'{key}_diff'] = abs(dvh_ref[key] - dvh_eval[key])
-                if dvh_ref[key] > 0:
-                    metrics[f'{key}_rel_diff'] = metrics[f'{key}_diff'] / dvh_ref[key] * 100
+                for key, ref_val in dvh_ref.items():
+                    metrics[f'{key}_ref'] = float(ref_val)
+
+                    eval_val = dvh_eval.get(key)
+                    if eval_val is None:
+                        continue
+
+                    metrics[f'{key}_eval'] = float(eval_val)
+
+                    diff = abs(ref_val - eval_val)
+                    metrics[f'{key}_diff'] = float(diff)
+                    if ref_val != 0:
+                        metrics[f'{key}_rel_diff'] = float(diff / ref_val * 100)
+            except Exception as exc:  # pragma: no cover
+                warnings.warn(f"DVH calculation failed ({exc}); skipping DVH metrics", stacklevel=2)
 
         return metrics
