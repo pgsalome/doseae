@@ -136,7 +136,6 @@ data/external/
 *.dicom
 
 # Model checkpoints and outputs
-models/
 checkpoints/
 outputs/
 results/
