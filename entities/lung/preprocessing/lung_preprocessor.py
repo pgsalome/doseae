@@ -246,8 +246,10 @@ class LungPreprocessor(BasePreprocessor):
                     cmd.extend(["--nr_thr_resamp", str(nr_thr_resamp)])
                 if nr_thr_saving:
                     cmd.extend(["--nr_thr_saving", str(nr_thr_saving)])
-                
+
                 # Enhanced environment variables for memory management
+                pycache_root = Path(tempfile.gettempdir()) / "pycache"
+                pycache_root.mkdir(parents=True, exist_ok=True)
                 env.setdefault('JOBLIB_MULTIPROCESSING', '0')
                 env.setdefault('MP_NO_SEM', '1')
                 env.setdefault('CUDA_LAUNCH_BLOCKING', '1')  # For better error reporting
@@ -256,7 +258,10 @@ class LungPreprocessor(BasePreprocessor):
                 env.setdefault('MKL_NUM_THREADS', '1')  # Limit MKL threads
                 env.setdefault('CUDA_MEMORY_FRACTION', '0.5')  # Limit CUDA memory usage
                 env.setdefault('PYTORCH_ALLOC_CONF', 'max_split_size_mb:64,roundup_power2_divisions:16')  # Better memory management
-                
+                # Avoid writing/importing stale bytecode into the venv during long cohort builds.
+                env.setdefault('PYTHONDONTWRITEBYTECODE', '1')
+                env.setdefault('PYTHONPYCACHEPREFIX', str(pycache_root))
+
                 self.logger.info(f"Running TotalSegmentator: {' '.join(cmd)} on device={device}")
                 self.logger.info(f"Environment: CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', 'all')}")
                 
@@ -661,7 +666,10 @@ class LungPreprocessor(BasePreprocessor):
             ipsi_lung, contra_lung = self._determine_ipsi_contra_lungs(
                 organ_masks['left_lung'], organ_masks['right_lung'], dose_image
             )
-            ipsi_side = 'left' if ipsi_lung == organ_masks['left_lung'] else 'right'
+            # _determine_ipsi_contra_lungs returns one of the original image
+            # objects. SimpleITK ``==`` performs a pixel-wise comparison and
+            # its result is truthy, which incorrectly labels every case left.
+            ipsi_side = 'left' if ipsi_lung is organ_masks['left_lung'] else 'right'
         else:
             ipsi_side = 'unknown'
 

@@ -439,6 +439,9 @@ class PatchDataset(BaseH5Dataset):
 
     def __getitem__(self, item: int) -> Dict[str, Any]:
         global_index = int(self._indices[item])
+        return self._build_sample_from_global_index(global_index)
+
+    def _build_sample_from_global_index(self, global_index: int) -> Dict[str, Any]:
         h5_file = self._require_file()
 
         ct_patch = np.asarray(h5_file["ct_patches"][global_index], dtype=np.float32)
@@ -494,6 +497,13 @@ class PatchDataset(BaseH5Dataset):
             sample = self.transform(sample)
 
         return sample
+
+    def get_sample_by_global_index(self, global_index: int) -> Dict[str, Any]:
+        """Return a sample by raw HDF5 patch index (bypasses active-index filtering)."""
+        global_index = int(global_index)
+        if global_index < 0 or global_index >= self._total_patches:
+            raise IndexError(f"Global patch index out of range: {global_index}")
+        return self._build_sample_from_global_index(global_index)
 
     @property
     def indices(self) -> np.ndarray:

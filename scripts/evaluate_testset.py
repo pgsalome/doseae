@@ -203,13 +203,31 @@ def reconstruct_from_cached_dataset(
     gt_volume = np.zeros(volume_shape, dtype=np.float32)
     vote_volume = np.zeros(volume_shape, dtype=np.uint16)
 
+    active_indices = getattr(dataset, "indices", None)
+    active_position_by_global: Optional[Dict[int, int]] = None
+    if active_indices is not None:
+        active_position_by_global = {int(global_idx): pos for pos, global_idx in enumerate(active_indices.tolist())}
+
     def offset_coords(coords):
         return tuple(int(coords[i] - min_coords[i]) for i in range(3))
 
     total = len(indices)
     for start in range(0, total, batch_size):
         chunk = indices[start:start + batch_size]
-        samples = [dataset[idx] for idx in chunk]
+        samples = []
+        for global_idx in chunk:
+            if active_position_by_global is not None:
+                position = active_position_by_global.get(int(global_idx))
+                if position is None:
+                    getter = getattr(dataset, "get_sample_by_global_index", None)
+                    if getter is None:
+                        raise KeyError(f"Global patch index {global_idx} is not active in the dataset view.")
+                    sample = getter(int(global_idx))
+                else:
+                    sample = dataset[position]
+            else:
+                sample = dataset[global_idx]
+            samples.append(sample)
         inputs = torch.stack([sample['input'] for sample in samples]).to(trainer.device)
 
         with torch.no_grad():
@@ -221,9 +239,26 @@ def reconstruct_from_cached_dataset(
         for sample, pred_patch, target_patch in zip(samples, preds, targets):
             z, y, x = offset_coords(sample['metadata']['start_coords'])
             dz, dy, dx = patch_shape
-            recon_volume[z:z + dz, y:y + dy, x:x + dx] += pred_patch[0]
-            gt_volume[z:z + dz, y:y + dy, x:x + dx] += target_patch[0]
-            vote_volume[z:z + dz, y:y + dy, x:x + dx] += 1
+
+            z0 = max(int(z), 0)
+            y0 = max(int(y), 0)
+            x0 = max(int(x), 0)
+            z1 = min(int(z + dz), int(volume_shape[0]))
+            y1 = min(int(y + dy), int(volume_shape[1]))
+            x1 = min(int(x + dx), int(volume_shape[2]))
+            if z0 >= z1 or y0 >= y1 or x0 >= x1:
+                continue
+
+            patch_z0 = z0 - int(z)
+            patch_y0 = y0 - int(y)
+            patch_x0 = x0 - int(x)
+            patch_z1 = patch_z0 + (z1 - z0)
+            patch_y1 = patch_y0 + (y1 - y0)
+            patch_x1 = patch_x0 + (x1 - x0)
+
+            recon_volume[z0:z1, y0:y1, x0:x1] += pred_patch[0, patch_z0:patch_z1, patch_y0:patch_y1, patch_x0:patch_x1]
+            gt_volume[z0:z1, y0:y1, x0:x1] += target_patch[0, patch_z0:patch_z1, patch_y0:patch_y1, patch_x0:patch_x1]
+            vote_volume[z0:z1, y0:y1, x0:x1] += 1
 
     nonzero_mask = vote_volume > 0
     recon_volume[nonzero_mask] /= vote_volume[nonzero_mask].astype(np.float32)

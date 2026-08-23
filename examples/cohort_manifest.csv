@@ -1,0 +1,3 @@
+patient_id,ct_path,dose_path,prescribed_dose
+CASE_001,/path/to/CASE_001/ct.nrrd,/path/to/CASE_001/dose.nrrd,60
+CASE_002,/path/to/CASE_002/ct.nrrd,/path/to/CASE_002/dose.nrrd,66

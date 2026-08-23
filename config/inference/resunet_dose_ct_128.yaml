@@ -1,0 +1,41 @@
+entity: lung
+
+dataset:
+  dataset_type: patches
+  input_channels:
+    - dose
+    - ct
+  num_workers: 0
+  pin_memory: false
+  patch_size_3d: [50, 50, 50]
+  input_size_3d: [50, 50, 50]
+  fusion:
+    method: weighted_sum
+    dose_weight: 0.7
+    ct_weight: 0.3
+    normalize: false
+  min_dose: 1.0e-6
+
+model:
+  type: resnet_unet_ae
+  latent_dim: 128
+  base_filters: 64
+  feature_dim: 256
+  output_channels: 1
+  input_mode: dose_ct
+  input_size: [50, 50, 50]
+  use_bottleneck: false
+  bilinear_upsampling: false
+  dropout_mlp: 0.1
+  dropout_decoder: 0.1
+  dropout_features: 0.1
+  projection_sizes: [256, 128, 64, 32, 16, 8, 4]
+  attention:
+    enabled: false
+
+training:
+  batch_size: 16
+
+pretrained_encoder:
+  # The released DoseAE checkpoint already contains the encoder weights.
+  use_pretrained_ct_encoder: false

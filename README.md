@@ -226,7 +226,7 @@ Extract from an existing patient patch cache:
 
 ```bash
 ./.venv/bin/python scripts/extract_doseae_latents.py \
-    --config /path/to/model_config.yaml \
+    --config config/inference/resunet_dose_ct_128.yaml \
     --checkpoint /path/to/lung_best_model.pth \
     --h5-path /path/to/patient.h5 \
     --patient-id PATIENT_ID \
@@ -238,7 +238,7 @@ Extract directly from a planning CT and physical dose volume:
 
 ```bash
 ./.venv/bin/python scripts/extract_doseae_latents.py \
-    --config /path/to/model_config.yaml \
+    --config config/inference/resunet_dose_ct_128.yaml \
     --checkpoint /path/to/lung_best_model.pth \
     --ct-path /path/to/ct.nrrd \
     --dose-path /path/to/dose.nrrd \
@@ -253,6 +253,33 @@ requested aggregation also produces CSV and compressed NumPy files with one
 feature vector per patient. DoseAE features are representations, not calibrated
 fibrosis probabilities; a supervised downstream model and an independent
 validation cohort are still required for clinical prediction.
+
+For a new cohort, start from `examples/cohort_manifest.csv` and provide one row
+per patient:
+
+```csv
+patient_id,ct_path,dose_path,prescribed_dose
+CASE_001,/data/CASE_001/ct.nrrd,/data/CASE_001/dose.nrrd,60
+CASE_002,/data/CASE_002/ct.nrrd,/data/CASE_002/dose.nrrd,66
+```
+
+Then process the cohort with resumable per-patient outputs:
+
+```bash
+./.venv/bin/python scripts/extract_doseae_cohort_features.py \
+    --manifest cohort.csv \
+    --config config/inference/resunet_dose_ct_128.yaml \
+    --checkpoint /path/to/lung_best_model.pth \
+    --aggregations mean ipsilateral_mean \
+    --device cuda:0 \
+    --segmentation-device gpu:0 \
+    --continue-on-error \
+    --output-dir outputs/new_cohort_features
+```
+
+The cohort runner also accepts an `h5_path` column instead of `ct_path` and
+`dose_path` when per-patient patch caches already exist. It writes extraction
+status and checkpoint/config hashes with the combined patient feature tables.
 
 ---
 

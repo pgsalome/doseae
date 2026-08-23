@@ -555,6 +555,8 @@ class ConfigurableAutoencoder(nn.Module):
     def _build_resnet_encoder(self):
         """Build ResNet-based encoder with adaptive depth."""
         layers = []
+        model_cfg = self.config.get('model', {}) if isinstance(self.config, dict) else {}
+        legacy_first_block_downsample = bool(model_cfg.get('legacy_resnet_first_block_downsample', False))
 
         # Initial convolution
         layers.extend([
@@ -569,8 +571,12 @@ class ConfigurableAutoencoder(nn.Module):
         current_filters = self.base_filters
         for i in range(self.encoder_depth):
             if i == 0:
-                next_filters = current_filters
-                stride = 1
+                if legacy_first_block_downsample:
+                    next_filters = min(current_filters * 2, self.base_filters * 8)
+                    stride = 2
+                else:
+                    next_filters = current_filters
+                    stride = 1
             else:
                 next_filters = min(current_filters * 2, self.base_filters * 8)
                 stride = 2
