@@ -214,35 +214,45 @@ The script relies on `datasets.loaders.create_data_loaders`, so the same HDF5 ca
 
 ---
 
-## Manuscript Reproduction
+## Lung-Dose Feature Extraction
 
-Rebuild the packaged manuscript figures and tables from the exported
-patient-level predictions and analysis caches:
+DoseAE can be used as a frozen lung-dose representation model. Given a trained
+checkpoint and either preprocessed HDF5 patches or a planning CT and dose
+volume, the extractor saves patch-level latent tensors and patient-level feature
+tables suitable for downstream fibrosis, pneumonitis, toxicity, or outcome
+models.
 
-```bash
-./.venv/bin/python scripts/reproduce_manuscript.py --strict
-```
-
-The default workflow is cache-only and does not retrain models, rerun DoseAE
-inference, or extract embeddings. Inspect all commands and dependencies without
-writing outputs with:
+Extract from an existing patient patch cache:
 
 ```bash
-./.venv/bin/python scripts/reproduce_manuscript.py --dry-run --strict
+./.venv/bin/python scripts/extract_doseae_latents.py \
+    --config /path/to/model_config.yaml \
+    --checkpoint /path/to/lung_best_model.pth \
+    --h5-path /path/to/patient.h5 \
+    --patient-id PATIENT_ID \
+    --aggregations mean ipsilateral_mean mean_std q95 \
+    --output-dir outputs/doseae_features
 ```
 
-Source-derived Table 1 data and supplementary imaging require private local
-inputs and are therefore opt-in:
+Extract directly from a planning CT and physical dose volume:
 
 ```bash
-./.venv/bin/python scripts/reproduce_manuscript.py \
-    --include-source-derived \
-    --include-supplementary \
-    --strict
+./.venv/bin/python scripts/extract_doseae_latents.py \
+    --config /path/to/model_config.yaml \
+    --checkpoint /path/to/lung_best_model.pth \
+    --ct-path /path/to/ct.nrrd \
+    --dose-path /path/to/dose.nrrd \
+    --patient-id PATIENT_ID \
+    --prescribed-dose 60 \
+    --aggregations mean ipsilateral_mean \
+    --output-dir outputs/doseae_features
 ```
 
-The workflow writes a SHA-256 output manifest to
-`oliver_paper/manifests/reproducibility_manifest.json`.
+The `.pt` output retains every patch embedding and its spatial metadata. Each
+requested aggregation also produces CSV and compressed NumPy files with one
+feature vector per patient. DoseAE features are representations, not calibrated
+fibrosis probabilities; a supervised downstream model and an independent
+validation cohort are still required for clinical prediction.
 
 ---
 

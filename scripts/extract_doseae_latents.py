@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract latent representations from a trained DoseAE model checkpoint.
+Extract reusable lung-dose features from a trained DoseAE model checkpoint.
+
+The frozen encoder produces one latent vector per lung patch. By default, this
+script also aggregates those patch vectors into one patient-level feature vector
+and saves it as CSV and compressed NumPy data for downstream outcome modeling.
+DoseAE does not itself output a fibrosis diagnosis; clinical prediction requires
+a separately trained supervised model using appropriate patient-level labels.
 
 This script supports two single-patient paths:
 1) H5-based extraction (fastest): uses an existing H5 file with patches.
@@ -44,6 +50,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import subprocess
@@ -69,6 +76,16 @@ from models import get_model
 
 
 LOGGER = logging.getLogger("doseae.latent_extraction")
+
+PATIENT_AGGREGATIONS = (
+    "mean",
+    "ipsilateral_mean",
+    "std",
+    "mean_std",
+    "q95",
+    "max",
+    "dose_weighted_mean",
+)
 
 DEFAULT_PREPROCESS_CONFIG: Dict[str, Any] = {
     "dataset": {
@@ -197,6 +214,22 @@ def parse_args() -> argparse.Namespace:
         "--latent-size",
         default=None,
         help="Select a specific latent projection size (int) or 'all' to save every size.",
+    )
+    parser.add_argument(
+        "--aggregations",
+        nargs="+",
+        choices=PATIENT_AGGREGATIONS,
+        default=["mean"],
+        help=(
+            "Patient-level summaries to export in addition to patch latents. "
+            "Use mean for a general representation or ipsilateral_mean for the "
+            "higher-dose lung representation used in the RILI analysis."
+        ),
+    )
+    parser.add_argument(
+        "--no-patient-features",
+        action="store_true",
+        help="Save patch-level .pt output only; do not export patient-level CSV/NPZ features.",
     )
     parser.add_argument(
         "--ct-path",
@@ -960,6 +993,8 @@ def extract_latents_from_patient(
     lobe_composite_threshold: Optional[float],
     max_patches_per_lobe: Optional[int],
     segmentation_cache_dir: Optional[str],
+    aggregations: Sequence[str],
+    export_patient_level: bool,
 ) -> None:
     preprocessor = LungPreprocessor(preproc_config, str(preprocess_output))
     if segmentation_cache_dir:
@@ -1058,6 +1093,15 @@ def extract_latents_from_patient(
     output_path = output_dir / f"doseae_{trial_tag}_{patient_id}_latents.pt"
     torch.save(output_payload, output_path)
     LOGGER.info("Saved latents to %s", output_path)
+    if export_patient_level:
+        export_patient_features(
+            latents,
+            metadata,
+            output_dir,
+            f"doseae_{trial_tag}_{patient_id}",
+            aggregations,
+            fallback_patient_id=patient_id,
+        )
 
 
 def extract_latents_for_split(
@@ -1151,6 +1195,172 @@ def extract_latents_for_split(
     if latents_by_size:
         return {k: torch.cat(v, dim=0) for k, v in latents_by_size.items()}, metadata, attention
     return torch.cat(latents, dim=0), metadata, attention
+
+
+def _metadata_patient_id(metadata: Dict[str, Any], fallback: Optional[str]) -> str:
+    for key in ("patient_id", "patient_key", "patid", "patient"):
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    if fallback is not None and str(fallback).strip():
+        return str(fallback).strip()
+    raise ValueError(
+        "Patch metadata does not contain a patient identifier. "
+        "Provide --patient-id for single-patient extraction."
+    )
+
+
+def _is_ipsilateral(metadata: Dict[str, Any]) -> bool:
+    value = metadata.get("side_type")
+    if value is not None and str(value).strip().lower() in {"ipsi", "ipsilateral"}:
+        return True
+    value = metadata.get("is_ipsilateral")
+    if isinstance(value, bool):
+        return value
+    if value is not None and str(value).strip().lower() in {"1", "true", "yes"}:
+        return True
+    value = metadata.get("side_type_index")
+    try:
+        return int(value) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _dose_weight(metadata: Dict[str, Any]) -> float:
+    for key in ("dose_mean", "mean_dose", "patch_mean_dose", "dose_max", "max_dose"):
+        value = metadata.get(key)
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(weight) and weight >= 0:
+            return weight
+    return np.nan
+
+
+def _as_feature_matrix(latents: torch.Tensor) -> np.ndarray:
+    values = latents.detach().cpu().numpy().astype(np.float32, copy=False)
+    if values.ndim < 2:
+        raise ValueError(f"Expected patch latents with at least two dimensions, got {values.shape}")
+    return values.reshape(values.shape[0], -1)
+
+
+def _aggregate_patient_features(
+    features: np.ndarray,
+    metadata: Sequence[Dict[str, Any]],
+    aggregation: str,
+    fallback_patient_id: Optional[str],
+) -> Tuple[List[str], np.ndarray, np.ndarray]:
+    if len(features) != len(metadata):
+        raise ValueError(
+            f"Latent/metadata length mismatch: {len(features)} embeddings vs {len(metadata)} metadata rows"
+        )
+
+    patient_ids: List[str] = []
+    patient_indices: Dict[str, List[int]] = {}
+    for index, item in enumerate(metadata):
+        patient_id = _metadata_patient_id(item, fallback_patient_id)
+        if patient_id not in patient_indices:
+            patient_ids.append(patient_id)
+            patient_indices[patient_id] = []
+        patient_indices[patient_id].append(index)
+
+    rows: List[np.ndarray] = []
+    patch_counts: List[int] = []
+    for patient_id in patient_ids:
+        indices = np.asarray(patient_indices[patient_id], dtype=int)
+        selected = features[indices]
+
+        if aggregation == "ipsilateral_mean":
+            keep = np.asarray([_is_ipsilateral(metadata[index]) for index in indices], dtype=bool)
+            if not np.any(keep):
+                raise ValueError(
+                    f"No ipsilateral patches were identified for patient {patient_id}; "
+                    "use mean or verify side metadata."
+                )
+            selected = selected[keep]
+        elif aggregation == "dose_weighted_mean":
+            weights = np.asarray([_dose_weight(metadata[index]) for index in indices], dtype=np.float64)
+            valid = np.isfinite(weights) & (weights > 0)
+            if not np.any(valid):
+                raise ValueError(
+                    f"No positive dose weights were found for patient {patient_id}; "
+                    "patch metadata must include dose_mean or an equivalent field."
+                )
+            selected = selected[valid]
+            weights = weights[valid]
+            row = np.average(selected, axis=0, weights=weights)
+            rows.append(np.asarray(row, dtype=np.float32))
+            patch_counts.append(int(len(selected)))
+            continue
+
+        if aggregation in {"mean", "ipsilateral_mean"}:
+            row = np.mean(selected, axis=0)
+        elif aggregation == "std":
+            row = np.std(selected, axis=0, ddof=0)
+        elif aggregation == "mean_std":
+            row = np.concatenate(
+                [np.mean(selected, axis=0), np.std(selected, axis=0, ddof=0)],
+                axis=0,
+            )
+        elif aggregation == "q95":
+            row = np.quantile(selected, 0.95, axis=0)
+        elif aggregation == "max":
+            row = np.max(selected, axis=0)
+        else:
+            raise ValueError(f"Unsupported patient aggregation: {aggregation}")
+
+        rows.append(np.asarray(row, dtype=np.float32))
+        patch_counts.append(int(len(selected)))
+
+    return patient_ids, np.stack(rows, axis=0), np.asarray(patch_counts, dtype=np.int32)
+
+
+def export_patient_features(
+    latents: Union[torch.Tensor, Dict[str, torch.Tensor]],
+    metadata: Sequence[Dict[str, Any]],
+    output_dir: Path,
+    output_stem: str,
+    aggregations: Sequence[str],
+    fallback_patient_id: Optional[str] = None,
+) -> List[Path]:
+    """Export one reusable feature vector per patient as CSV and compressed NPZ."""
+    latent_sets = latents if isinstance(latents, dict) else {"default": latents}
+    saved: List[Path] = []
+
+    for latent_name, latent_tensor in latent_sets.items():
+        matrix = _as_feature_matrix(latent_tensor)
+        latent_suffix = "" if latent_name == "default" else f"_latent{latent_name}"
+        for aggregation in aggregations:
+            patient_ids, patient_features, patch_counts = _aggregate_patient_features(
+                matrix,
+                metadata,
+                aggregation,
+                fallback_patient_id,
+            )
+            base = output_dir / f"{output_stem}{latent_suffix}_patient_features_{aggregation}"
+            csv_path = base.with_suffix(".csv")
+            npz_path = base.with_suffix(".npz")
+            feature_names = [f"feature_{index:04d}" for index in range(patient_features.shape[1])]
+
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["patient_id", "n_patches", "aggregation", *feature_names])
+                for patient_id, n_patches, row in zip(patient_ids, patch_counts, patient_features):
+                    writer.writerow([patient_id, int(n_patches), aggregation, *row.tolist()])
+
+            np.savez_compressed(
+                npz_path,
+                patient_ids=np.asarray(patient_ids, dtype=str),
+                features=patient_features,
+                n_patches=patch_counts,
+                aggregation=np.asarray(aggregation),
+                latent_name=np.asarray(str(latent_name)),
+            )
+            LOGGER.info("Saved patient features to %s and %s", csv_path, npz_path)
+            saved.extend([csv_path, npz_path])
+
+    return saved
 
 
 def main() -> None:
@@ -1250,6 +1460,15 @@ def main() -> None:
             output_path = output_dir / f"doseae_{trial_tag}_{patient_id}_latents.pt"
             torch.save(output_payload, output_path)
             LOGGER.info("Saved latents to %s", output_path)
+            if not args.no_patient_features:
+                export_patient_features(
+                    latents,
+                    metadata,
+                    output_dir,
+                    f"doseae_{trial_tag}_{patient_id}",
+                    args.aggregations,
+                    fallback_patient_id=patient_id,
+                )
         else:
             extract_latents_from_patient(
                 config=config,
@@ -1272,6 +1491,8 @@ def main() -> None:
                 lobe_composite_threshold=args.lobe_composite_threshold,
                 max_patches_per_lobe=args.max_patches_per_lobe,
                 segmentation_cache_dir=args.segmentation_cache_dir,
+                aggregations=args.aggregations,
+                export_patient_level=not args.no_patient_features,
             )
         return
 
@@ -1384,6 +1605,14 @@ def main() -> None:
         output_path = output_dir / f"doseae_{trial_tag}_{split}_latents.pt"
         torch.save(output_payload, output_path)
         LOGGER.info("Saved latents to %s", output_path)
+        if not args.no_patient_features:
+            export_patient_features(
+                latents,
+                metadata,
+                output_dir,
+                f"doseae_{trial_tag}_{split}",
+                args.aggregations,
+            )
 
 
 if __name__ == "__main__":
