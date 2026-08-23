@@ -85,7 +85,7 @@ Examples:
     # Execute the appropriate command by calling the existing scripts
     if args.command == 'preprocess':
         cmd = [
-            'python', 'scripts/preprocess_with_new_pipeline.py',
+            sys.executable, 'scripts/preprocess.py',
             '--config', args.config,
             '--splits', args.splits,
             '--output', args.output,
@@ -95,7 +95,7 @@ Examples:
         ]
     elif args.command == 'train':
         cmd = [
-            'python', 'scripts/train.py',
+            sys.executable, 'scripts/train.py',
             '--config', args.config,
             '--entity', args.entity,
             '--data_dir', args.data_dir,
@@ -105,12 +105,12 @@ Examples:
         ]
     elif args.command == 'optimize':
         cmd = [
-            'python', 'scripts/optimize.py',
+            sys.executable, 'scripts/optimize.py',
             '--base_config', args.base_config
         ]
     elif args.command == 'experiments':
         cmd = [
-            'python', 'scripts/train_three_experiments.py',
+            sys.executable, 'scripts/train_three_experiments.py',
             '--experiment', args.experiment,
             '--config_dir', args.config_dir
         ]

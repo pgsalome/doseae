@@ -34,11 +34,10 @@ fi
 # ---------------------------------------------------------------------------
 mkdir -p "${OUTPUT_DIR}"
 
-python scripts/preprocess_with_new_pipeline.py \
+python scripts/preprocess.py \
     --config "${CONFIG_FILE}" \
     --splits "${DATA_SPLITS}" \
     --output "${OUTPUT_DIR}" \
     --experiment_type patch \
     --n_patients 100000 \
     --workers 4
-

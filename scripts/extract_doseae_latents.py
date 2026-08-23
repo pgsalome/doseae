@@ -492,11 +492,23 @@ def load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torch
     if any(key.startswith("module.") for key in state_dict.keys()):
         state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
 
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        LOGGER.warning("Missing keys when loading checkpoint: %s", missing)
-    if unexpected:
-        LOGGER.warning("Unexpected keys when loading checkpoint: %s", unexpected)
+    try:
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Checkpoint tensor shapes do not match the configured DoseAE architecture. "
+            "Use the config released with this checkpoint."
+        ) from exc
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing={missing[:10]}")
+        if unexpected:
+            details.append(f"unexpected={unexpected[:10]}")
+        raise RuntimeError(
+            "Checkpoint is incompatible with the configured DoseAE architecture: "
+            + "; ".join(details)
+        )
 
 
 def move_batch_to_device(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:

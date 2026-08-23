@@ -27,7 +27,7 @@ python scripts/main.py experiments --experiment all --config_dir configs/experim
 
 ### 1. `main.py` - Unified Entry Point
 Simple interface that calls your existing scripts:
-- `preprocess` → calls `preprocess_with_new_pipeline.py`
+- `preprocess` → calls `preprocess.py`
 - `train` → calls `train.py`
 - `optimize` → calls `optimize.py` (Neptune optimization)
 - `experiments` → calls `train_three_experiments.py`
@@ -60,12 +60,12 @@ python scripts/optimize.py --base_config config/config.yaml
 - Supports all model architectures
 - Configurable number of trials
 
-### 4. `preprocess_with_new_pipeline.py` - Data Preprocessing
+### 4. `preprocess.py` - Data Preprocessing
 Preprocess medical imaging data for both image and patch experiments.
 
 **Usage:**
 ```bash
-python scripts/preprocess_with_new_pipeline.py --config config.yaml --splits data_splits.json --output ./processed --experiment_type patch
+python scripts/preprocess.py --config config.yaml --splits data_splits.json --output ./processed --experiment_type patch
 ```
 
 ### 5. `train_three_experiments.py` - Multi-Experiment Training
@@ -84,7 +84,7 @@ doseae/
 │   ├── main.py                  # Unified entry point
 │   ├── train.py                 # Direct training
 │   ├── optimize.py              # Neptune optimization
-│   ├── preprocess_with_new_pipeline.py
+│   ├── preprocess.py
 │   └── train_three_experiments.py
 ├── models/                      # Shared model architectures
 │   ├── __init__.py              # get_model() factory

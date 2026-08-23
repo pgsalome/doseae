@@ -1,0 +1,9 @@
+[submodule "cOOpD"]
+	path = cOOpD
+	url = https://github.com/MIC-DKFZ/cOOpD.git
+[submodule "external/MedicalNet"]
+	path = external/MedicalNet
+	url = https://github.com/Tencent/MedicalNet.git
+[submodule "external/OpenTPS"]
+	path = external/OpenTPS
+	url = https://gitlab.com/openmcsquare/opentps.git

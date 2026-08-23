@@ -6,7 +6,7 @@ DoseAE is a research toolkit for learning generative and representation models o
 
 ## Key Features
 
-- **Unified preprocessing**: `scripts/preprocess_with_new_pipeline.py` extracts CT volumes, dose grids, metadata, spatial coordinates, lobes, and cached patches into reusable HDF5 files.
+- **Unified preprocessing**: `scripts/preprocess.py` extracts CT volumes, dose grids, metadata, spatial coordinates, lobes, and cached patches into reusable HDF5 files.
 - **Multi-channel inputs**: build tensors with any combination of dose, CT, and fused channels; attention blocks can consume spatial, lobe, or dose metadata.
 - **Configurable architectures**: the `models/architectures` package contains a configurable autoencoder (conv/resnet/unet/mlp variants), DoseAE ResUNet, and both 2D/3D VAEs.
 - **Clinical losses & metrics**: optional gamma, DVH, and auxiliary targets integrate directly into the training loop.
@@ -37,7 +37,7 @@ DoseAE is a research toolkit for learning generative and representation models o
 │   ├── evaluation/             # Clinical/standard metrics
 │   └── optimization/           # Neptune legacy optimiser
 ├── scripts/
-│   ├── preprocess_with_new_pipeline.py
+│   ├── preprocess.py
 │   ├── train.py                # Main entry (train / optimise)
 │   ├── inference.py            # Evaluation utilities
 │   ├── train_three_experiments.py (legacy)
@@ -55,7 +55,7 @@ Legacy code from the original project remains under `legacy_*` scripts and unuse
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/doseae.git
+git clone --recurse-submodules https://github.com/pgsalome/doseae.git
 cd doseae
 
 python -m venv .venv
@@ -74,7 +74,7 @@ If you plan to use WandB or Neptune ensure the corresponding environment variabl
 
 2. **Run preprocessing**  
    ```bash
-   python scripts/preprocess_with_new_pipeline.py \
+   python scripts/preprocess.py \
        --config config/new_pipeline_config.yaml \
        --splits data/full_splits_auto.json \
        --output /data/NSCLC-Cetuximab_AE_cache \
@@ -280,6 +280,11 @@ Then process the cohort with resumable per-patient outputs:
 The cohort runner also accepts an `h5_path` column instead of `ct_path` and
 `dose_path` when per-patient patch caches already exist. It writes extraction
 status and checkpoint/config hashes with the combined patient feature tables.
+CT and dose paths must be volumes readable by SimpleITK, such as NRRD, NIfTI,
+or MHA. Convert raw DICOM CT series and RTDOSE objects to registered volumes
+before using this manifest workflow. Direct CT+dose extraction runs
+TotalSegmentator automatically; HDF5 extraction reuses the stored masks and
+does not require segmentation.
 
 ---
 
