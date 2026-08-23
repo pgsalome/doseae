@@ -216,11 +216,11 @@ The script relies on `datasets.loaders.create_data_loaders`, so the same HDF5 ca
 
 ## Manuscript Reproduction
 
-Rebuild the packaged Oliver manuscript figures and tables from the exported
+Rebuild the packaged manuscript figures and tables from the exported
 patient-level predictions and analysis caches:
 
 ```bash
-./.venv/bin/python scripts/reproduce_oliver_paper.py --strict
+./.venv/bin/python scripts/reproduce_manuscript.py --strict
 ```
 
 The default workflow is cache-only and does not retrain models, rerun DoseAE
@@ -228,14 +228,14 @@ inference, or extract embeddings. Inspect all commands and dependencies without
 writing outputs with:
 
 ```bash
-./.venv/bin/python scripts/reproduce_oliver_paper.py --dry-run --strict
+./.venv/bin/python scripts/reproduce_manuscript.py --dry-run --strict
 ```
 
 Source-derived Table 1 data and supplementary imaging require private local
 inputs and are therefore opt-in:
 
 ```bash
-./.venv/bin/python scripts/reproduce_oliver_paper.py \
+./.venv/bin/python scripts/reproduce_manuscript.py \
     --include-source-derived \
     --include-supplementary \
     --strict

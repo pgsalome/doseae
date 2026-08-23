@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the Oliver manuscript figures and tables from exported analysis data.
+"""Rebuild the manuscript figures and tables from exported analysis data.
 
 The default workflow is deliberately cache-only: it does not train models,
 extract embeddings, or recompute dose reconstructions. Source-derived Table 1
@@ -137,7 +137,7 @@ def reproduce_figures(args: argparse.Namespace, results: list[TaskResult]) -> No
         figure1_temp = Path("<temporary-directory>") / "figure1"
         temp_context = None
     else:
-        temp_context = tempfile.TemporaryDirectory(prefix="doseae_oliver_figure1_")
+        temp_context = tempfile.TemporaryDirectory(prefix="doseae_manuscript_figure1_")
         figure1_temp = Path(temp_context.name)
     try:
         result = run_task(
@@ -210,7 +210,7 @@ def reproduce_figures(args: argparse.Namespace, results: list[TaskResult]) -> No
         figure3_temp = Path("<temporary-directory>") / "figure3"
         temp_context = None
     else:
-        temp_context = tempfile.TemporaryDirectory(prefix="doseae_oliver_figure3_")
+        temp_context = tempfile.TemporaryDirectory(prefix="doseae_manuscript_figure3_")
         figure3_temp = Path(temp_context.name)
     try:
         result = run_task(
