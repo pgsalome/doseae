@@ -1,0 +1,52 @@
+diff --git a/opentps_core/opentps/core/io/dicomIO.py b/opentps_core/opentps/core/io/dicomIO.py
+index b1cafcb2..52c53c69 100644
+--- a/opentps_core/opentps/core/io/dicomIO.py
++++ b/opentps_core/opentps/core/io/dicomIO.py
+@@ -1109,9 +1109,9 @@ def readDicomPlan(dcmFile) -> RTPlan:
+    
+     #### PHOTON PLAN
+     if dcm.SOPClassUID == "1.2.840.10008.5.1.4.1.1.481.5":
+-        plan.modality = "RT Plan IOD"
+         dcm = pydicom.dcmread(dcmFile)
+         plan = PhotonPlan(name=name, patient = patient)
++        plan.modality = "RT Plan IOD"
+         plan.patient = patient
+ 
+         if dcm.BeamSequence[0].RadiationType == "PHOTON": ### Filter also by modality, this TPS doesnt support wedges
+@@ -1166,7 +1166,9 @@ def readDicomPlan(dcmFile) -> RTPlan:
+                     ymlcXcoord = (ymlcBoundaries[:-1] + ymlcBoundaries[1:])/2.0
+                     beam.numberOfLeafs = len(ymlcXcoord)
+ 
+-            numberOfSegments = len(dcm_beam.ControlPointSequence) - 1 
++            numberOfSegments = len(dcm_beam.ControlPointSequence) - 1
++            last_x_jaw_mm = None
++            last_y_jaw_mm = None
+             for i, dcm_beamSegment in enumerate(dcm_beam.ControlPointSequence):
+                 if i == numberOfSegments: ### Doesn't deliver dose?
+                     continue
+@@ -1188,8 +1190,10 @@ def readDicomPlan(dcmFile) -> RTPlan:
+                         type = limitingDevice.RTBeamLimitingDeviceType
+                         if type == 'ASYMX':
+                             beamSegment.x_jaw_mm = limitingDevice.LeafJawPositions
++                            last_x_jaw_mm = limitingDevice.LeafJawPositions
+                         elif type == 'ASYMY':
+                             beamSegment.y_jaw_mm = limitingDevice.LeafJawPositions
++                            last_y_jaw_mm = limitingDevice.LeafJawPositions
+                         elif type == 'MLCX':
+                             positions = np.array(limitingDevice.LeafJawPositions)
+                             beamSegment.Xmlc_mm = np.column_stack((xmlcBoundaries[:-1], xmlcBoundaries[1:], positions[:beam.numberOfLeafs], positions[beam.numberOfLeafs:]))
+@@ -1198,6 +1202,14 @@ def readDicomPlan(dcmFile) -> RTPlan:
+                         else:
+                             logger.warning('Warning: No proper beam limiting device was found')
+ 
++                    # Later control points often omit unchanged jaw positions.
++                    # Carry forward the previous values so segment-to-beamlet
++                    # conversion has a valid aperture.
++                    if len(beamSegment.x_jaw_mm) == 0 and last_x_jaw_mm is not None:
++                        beamSegment.x_jaw_mm = last_x_jaw_mm
++                    if len(beamSegment.y_jaw_mm) == 0 and last_y_jaw_mm is not None:
++                        beamSegment.y_jaw_mm = last_y_jaw_mm
++
+                     beamSegment.mu = beam.scalingFactor * (dcm_beam.ControlPointSequence[i+1].CumulativeMetersetWeight - dcm_beam.ControlPointSequence[i].CumulativeMetersetWeight)
+                     # beamSegment.convertSegmentsIntoBeamlets()
+                 else:

@@ -2,6 +2,9 @@
 """
 Generate clinically-perturbed synthetic dose plans using OpenTPS.
 
+For a fresh checkout, apply the tracked OpenTPS DICOM compatibility patch with
+``scripts/apply_opentps_vmat_sbrt_patch.sh`` before processing dynamic plans.
+
 Example:
     python scripts/run_opentps_perturbations.py \
         --config config/single_patient_synth.yaml \
@@ -97,6 +100,7 @@ def main() -> None:
         dose_path=dose_path,
         rtplan_path=rtplan_path,
         n_samples=args.n_samples,
+        prescribed_dose=meta.get("prescribed_dose"),
         output_dir=output_dir,
         retain_reference=args.retain_reference,
     )

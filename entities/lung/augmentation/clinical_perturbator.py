@@ -32,6 +32,9 @@ class BeamMetadata:
     isocenter_mm: np.ndarray
     energies_kev: List[float]
     cumulative_meterset: List[float]
+    original_beam_count: int
+    original_control_point_count: int
+    delivery_approximation: str
 
 
 class ClinicalPlanPerturbator:
@@ -48,6 +51,10 @@ class ClinicalPlanPerturbator:
         )
         perturb_cfg = self.config.get("clinical_perturbation", {}) or {}
         self.target_threshold_range = perturb_cfg.get("target_threshold_range", [0.78, 0.92])
+        self.dynamic_control_point_samples = max(
+            1,
+            int(perturb_cfg.get("dynamic_control_point_samples", 7)),
+        )
         self.random_seed = perturb_cfg.get("random_seed", self.config.get("random_seed"))
         self.rng = np.random.default_rng(self.random_seed)
 
@@ -67,6 +74,7 @@ class ClinicalPlanPerturbator:
         dose_path: Path,
         rtplan_path: Path,
         n_samples: int,
+        prescribed_dose: Optional[float] = None,
         output_dir: Optional[Path] = None,
         retain_reference: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -84,7 +92,10 @@ class ClinicalPlanPerturbator:
         ct_image = sitk.ReadImage(str(ct_path))
         dose_image = sitk.ReadImage(str(dose_path))
         dose_image = self._resample_dose_to_ct(ct_image, dose_image)
-        norm_dose, scale_info = self._normalize_dose(dose_image)
+        norm_dose, scale_info = self._normalize_dose(
+            dose_image,
+            prescribed_dose=prescribed_dose,
+        )
 
         variants = self.generate_variants(
             patient_id=patient_id,
@@ -183,6 +194,10 @@ class ClinicalPlanPerturbator:
                     "isocenter_mm": plan_metadata.isocenter_mm.tolist(),
                     "energies_mev": plan_metadata.energies_kev,
                     "cumulative_meterset": plan_metadata.cumulative_meterset,
+                    "original_beam_count": plan_metadata.original_beam_count,
+                    "original_control_point_count": plan_metadata.original_control_point_count,
+                    "open_tps_beam_count": len(plan_metadata.gantry_angles),
+                    "delivery_approximation": plan_metadata.delivery_approximation,
                 },
                 "perturbation": {
                     "gantry_jitter_pct": params["gantry_jitter_pct"].tolist(),
@@ -216,18 +231,61 @@ class ClinicalPlanPerturbator:
         energies: List[float] = []
         meterset_weights: List[float] = []
         isocenters: List[np.ndarray] = []
+        original_control_point_count = 0
+        used_dynamic_sampling = False
 
         for beam_index, beam in enumerate(ds.BeamSequence):
-            cp0 = beam.ControlPointSequence[0]
-            gantry_angles.append(float(getattr(cp0, "GantryAngle", 0.0)))
-            couch_angles.append(float(getattr(cp0, "PatientSupportAngle", 0.0)))
-            beam_names.append(getattr(beam, "BeamName", f"B{beam_index + 1}"))
-            energies.append(float(getattr(cp0, "NominalBeamEnergy", 0.0)))
-            meterset_weights.append(
-                float(getattr(beam.ControlPointSequence[-1], "CumulativeMetersetWeight", 1.0))
-            )
-            iso = np.array(getattr(cp0, "IsocenterPosition", [0.0, 0.0, 0.0]), dtype=np.float32)
-            isocenters.append(iso)
+            control_points = list(beam.ControlPointSequence)
+            original_control_point_count += len(control_points)
+            beam_name = str(getattr(beam, "BeamName", f"B{beam_index + 1}"))
+            beam_type = str(getattr(beam, "BeamType", "STATIC")).upper()
+
+            records: List[Tuple[float, float, float, float, np.ndarray]] = []
+            gantry = couch = energy = 0.0
+            meterset = 0.0
+            isocenter = np.zeros(3, dtype=np.float32)
+            for cp in control_points:
+                gantry = float(getattr(cp, "GantryAngle", gantry))
+                couch = float(getattr(cp, "PatientSupportAngle", couch))
+                energy = float(getattr(cp, "NominalBeamEnergy", energy))
+                meterset = float(getattr(cp, "CumulativeMetersetWeight", meterset))
+                if hasattr(cp, "IsocenterPosition"):
+                    isocenter = np.asarray(cp.IsocenterPosition, dtype=np.float32)
+                records.append((gantry, couch, energy, meterset, isocenter.copy()))
+
+            dynamic = beam_type == "DYNAMIC" or len(records) > 2
+            if dynamic:
+                used_dynamic_sampling = True
+                sample_count = min(self.dynamic_control_point_samples, len(records))
+                cp_angles = np.asarray([record[0] for record in records], dtype=float)
+                target_angles = np.mod(
+                    cp_angles[0] + np.arange(sample_count) * 360.0 / sample_count,
+                    360.0,
+                )
+                selected = []
+                for target_angle in target_angles:
+                    circular_distance = np.abs(
+                        (cp_angles - target_angle + 180.0) % 360.0 - 180.0
+                    )
+                    for cp_index in np.argsort(circular_distance):
+                        if int(cp_index) not in selected:
+                            selected.append(int(cp_index))
+                            break
+                indices = np.asarray(selected, dtype=int)
+            else:
+                indices = np.asarray([0], dtype=int)
+
+            for sample_number, cp_index in enumerate(indices, start=1):
+                gantry, couch, energy, meterset, isocenter = records[int(cp_index)]
+                gantry_angles.append(gantry)
+                couch_angles.append(couch)
+                if dynamic:
+                    beam_names.append(f"{beam_name}_CP{int(cp_index) + 1:03d}")
+                else:
+                    beam_names.append(beam_name)
+                energies.append(energy)
+                meterset_weights.append(meterset)
+                isocenters.append(isocenter)
 
         if not isocenters:
             raise RuntimeError("RTPLAN does not contain any beam definitions.")
@@ -240,6 +298,13 @@ class ClinicalPlanPerturbator:
             isocenter_mm=iso_mean.astype(np.float32),
             energies_kev=energies,
             cumulative_meterset=meterset_weights,
+            original_beam_count=len(ds.BeamSequence),
+            original_control_point_count=original_control_point_count,
+            delivery_approximation=(
+                f"dynamic delivery sampled as {len(gantry_angles)} static control-point directions"
+                if used_dynamic_sampling
+                else "clinical static beam directions"
+            ),
         )
 
     def _sample_parameters(self, metadata: BeamMetadata) -> Dict[str, Any]:
